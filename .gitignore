@@ -47,3 +47,11 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# LIMS specific generated files
+www/qr_*.png
+data/labels/
+data/barcodes/
+data/*.sqlite
+data/*.db
+*.zip
