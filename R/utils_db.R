@@ -1,6 +1,7 @@
-# R/helpers.R
-# Database initialization, sequential ID generators, and label PNG utility.
-# Sourced by global.R — pool is available as a global object.
+# utils_db.R
+# Raw database utility functions - no Shiny dependencies
+# These functions work with explicit database connections
+# The global pool object is available in the global environment for most use cases
 
 # ── Database initialization ──────────────────────────────────────────────────
 
@@ -82,7 +83,7 @@ initialize_database <- function() {
       equipment_id = c("U01", "Z01", "F01", "F02", "F03", "F04", "G01"),
       character_name = c(
         "Totoro, in B16-1",
-        "Jiji, -30\u00b0C in R100",
+        "Jiji, -30°C in R100",
         "Teto, 4C in R100",
         "Warawara, the large 2-door in the kitchen",
         "Ponyo, the small 2-door in my office",
@@ -90,8 +91,8 @@ initialize_database <- function() {
         "Laputa (Castle in the Sky)"
       ),
       category = c(
-        "Ultra-Low Temperature (-80\u00b0C)",
-        "Standard Freezers (-20\u00b0C to -30\u00b0C)",
+        "Ultra-Low Temperature (-80°C)",
+        "Standard Freezers (-20°C to -30°C)",
         "Fridges (4C)", "Fridges (4C)", "Fridges (4C)", "Fridges (4C)",
         "Plant growth chamber"
       ),
@@ -113,42 +114,87 @@ initialize_database <- function() {
   return(db_path)
 }
 
-# ── Sequential ID generators ─────────────────────────────────────────────────
-# These reference `pool` from the global environment (set in global.R).
+# ── Site database functions ──────────────────────────────────────────────────
 
-generate_site_id <- function() {
-  con <- poolCheckout(pool)
+fetch_site_by_id <- function(site_id, con) {
+  dbGetQuery(con,
+    "SELECT * FROM Sites WHERE site_id = ?",
+    params = list(site_id))
+}
+
+fetch_all_sites <- function(con) {
+  dbGetQuery(con,
+    "SELECT site_id, site_name, site_lat, site_long FROM Sites ORDER BY site_id")
+}
+
+insert_site <- function(site_id, site_name, site_lat = NULL, site_long = NULL, con) {
+  dbExecute(con,
+    "INSERT INTO Sites (site_id, site_name, site_lat, site_long)
+     VALUES (?, ?, ?, ?)",
+    params = list(site_id, site_name, site_lat, site_long))
+}
+
+check_site_exists <- function(site_id, con) {
+  result <- tryCatch({
+    dbGetQuery(con,
+      "SELECT COUNT(*) as count FROM Sites WHERE site_id = ?",
+      params = list(site_id))
+  }, error = function(e) {
+    data.frame(count = 0)
+  })
+  if (nrow(result) > 0) result$count[1] > 0 else FALSE
+}
+
+# ── Sample/Plant database functions ──────────────────────────────────────────
+
+fetch_samples_by_site <- function(site_id, con) {
+  dbGetQuery(con,
+    "SELECT * FROM Plants WHERE site_id = ? ORDER BY plant_id",
+    params = list(site_id))
+}
+
+insert_sample <- function(plant_id, site_id, species, health_status = NA, fridge_loc = NA, con) {
+  dbExecute(con,
+    "INSERT INTO Plants (plant_id, site_id, species, health_status, fridge_loc)
+     VALUES (?, ?, ?, ?, ?)",
+    params = list(plant_id, site_id, species, health_status, fridge_loc))
+}
+
+# ── Label database functions ─────────────────────────────────────────────────
+
+fetch_all_labels <- function(con) {
+  dbGetQuery(con,
+    "SELECT label_id, stage, site_id, sample_type, sample_id, sample_status
+     FROM Labels ORDER BY created_date DESC LIMIT 100")
+}
+
+insert_label <- function(label_id, stage, site_id, sample_type, sample_id, con) {
+  dbExecute(con,
+    "INSERT INTO Labels (label_id, stage, site_id, sample_type, sample_id)
+     VALUES (?, ?, ?, ?, ?)",
+    params = list(label_id, stage, site_id, sample_type, sample_id))
+}
+
+# ── Sequential ID generators ─────────────────────────────────────────────────
+
+generate_site_id <- function(con) {
   result <- dbGetQuery(con, "SELECT COUNT(*) as count FROM Sites")
-  poolReturn(con)
   sprintf("ST%04d", result$count[1] + 1)
 }
 
-generate_plant_id <- function(site_id) {
-  con <- poolCheckout(pool)
+generate_plant_id <- function(site_id, con) {
   result <- dbGetQuery(con,
-    paste0("SELECT COUNT(*) as count FROM Plants WHERE site_id = '", site_id, "'"))
-  poolReturn(con)
+    "SELECT COUNT(*) as count FROM Plants WHERE site_id = ?",
+    params = list(site_id))
   sprintf("%s-P%04d", site_id, result$count[1] + 1)
 }
 
-check_duplicate_plant_id <- function(plant_id) {
-  con <- poolCheckout(pool)
-  result <- dbGetQuery(con,
-    paste0("SELECT COUNT(*) as count FROM Plants WHERE plant_id = '", plant_id, "'"))
-  poolReturn(con)
-  result$count[1] > 0
-}
-
-generate_proc_id <- function() {
-  con <- poolCheckout(pool)
+generate_proc_id <- function(con) {
   result <- dbGetQuery(con, "SELECT COUNT(*) as count FROM Processing")
-  poolReturn(con)
   sprintf("PROC%06d", result$count[1] + 1)
 }
 
-
-# ── Label PNG generation ──────────────────────────────────────────────────────
-# Renders a single 1800×600 label: sample ID + date on the left, QR on the right.
+# ── Label PNG generation ─────────────────────────────────────────────────────
 
 generate_label_png <- function(full_id, label_date, label_file) {
   # Generate QR code into a temporary square PNG

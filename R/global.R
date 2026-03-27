@@ -1,6 +1,6 @@
 # global.R
-# Sourced automatically by Shiny before app.R.
-# Handles: library loading, helper sourcing, and shared pool initialization.
+# Sourced automatically by Shiny before app.R
+# Handles: library loading, utilities sourcing, and shared pool initialization
 
 # ── Libraries ─────────────────────────────────────────────────────────────────
 library(shiny)
@@ -16,8 +16,12 @@ library(gridExtra)
 library(grid)
 library(base64enc)
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-source("R/helpers.R")
+# ── Database utilities ─────────────────────────────────────────────────────────
+source("R/utils_db.R")
+
+# ── Shiny modules ──────────────────────────────────────────────────────────────
+source("R/mod_sites.R")
+# source("R/mod_labels.R")  # Disabled for testing
 
 # ── Static directories ────────────────────────────────────────────────────────
 if (!dir.exists("www")) dir.create("www")
