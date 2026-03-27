@@ -1,9 +1,13 @@
 # Riverside Rhizobia LIMS Application
-# Complete Laboratory Information Management System built with R Shiny
+# Session-Based Batch Scanning Workflow for Hardware Barcode Scanners
+# 
+# State Machine:
+# State 0 (Idle): Waiting for Equipment ID scan
+# State 1 (Active): Locked to equipment, collecting plant ID scans
+# Exit: Same equipment ID, FINISH barcode, or error
 
 # Load required libraries
 library(shiny)
-library(bs4Dash)
 library(bslib)
 library(shinyjs)
 library(DT)
@@ -15,6 +19,9 @@ library(DBI)
 library(gridExtra)
 library(grid)
 library(base64enc)
+# Camera and audio libraries for mobile scanning
+# Note: shinyScanner requires external dependencies
+# Alternative: Using WebRTC via HTML5 camera API with JavaScript
 
 # Create app directory for QR codes
 if (!dir.exists("www")) {
@@ -64,6 +71,7 @@ initialize_database <- function() {
     CREATE TABLE IF NOT EXISTS Processing (
       proc_id TEXT PRIMARY KEY,
       plant_id TEXT NOT NULL,
+      equipment_id TEXT,
       type TEXT NOT NULL,
       date DATETIME DEFAULT CURRENT_TIMESTAMP,
       technician TEXT,
@@ -80,6 +88,25 @@ initialize_database <- function() {
       category TEXT NOT NULL,
       description TEXT,
       date_created DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  ")
+  
+  # Create Labels table for tracking generated QR code labels
+  dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS Labels (
+      label_id TEXT PRIMARY KEY,
+      stage INTEGER,
+      site_id TEXT,
+      sample_type TEXT,
+      sample_id TEXT,
+      part_code TEXT,
+      part_id TEXT,
+      use_code TEXT,
+      sample_status TEXT DEFAULT 'label_created',
+      storage_location TEXT,
+      collected_date DATETIME,
+      created_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(site_id) REFERENCES Sites(site_id)
     )
   ")
   
@@ -142,988 +169,1838 @@ check_duplicate_plant_id <- function(plant_id) {
   result$count[1] > 0
 }
 
-# UI Definition
-ui <- tagList(
+
+# ============================================================
+# UI DEFINITION - Two-Tab Interface
+# ============================================================
+
+ui <- page(
+  theme = bslib::bs_theme(),
   shinyjs::useShinyjs(),
   
   tags$head(
+    # Audio functions
+    tags$script(HTML("
+      function playStartBeep() {
+        var audio = new Audio('https://actions.google.com/sounds/v1/alarms/digital_alarm_clock.ogg');
+        audio.volume = 0.8;
+        audio.play().catch(e => console.log('Audio play failed:', e));
+      }
+      
+      function playSuccessBeep() {
+        var audio = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
+        audio.volume = 0.7;
+        audio.play().catch(e => console.log('Audio play failed:', e));
+      }
+      
+      function playErrorBeep() {
+        var audio = new Audio('https://actions.google.com/sounds/v1/alarms/beep_error.ogg');
+        audio.volume = 0.7;
+        audio.play().catch(e => console.log('Audio play failed:', e));
+      }
+      
+      // Force focus on scanner input every 2 seconds when on batch scanning tab
+      setInterval(function() {
+        var elem = document.getElementById('master_scanner_input');
+        if (elem && document.activeElement !== elem && elem.offsetParent !== null) {
+          elem.focus();
+        }
+      }, 2000);
+    ")),
+    
     tags$style(HTML("
-      /* Force full-width everything */
-      body { margin: 0; padding: 0; }
-      .navbar { margin-bottom: 0; }
-      
-      /* Full width page wrapper */
-      .tab-content { padding: 0 !important; }
-      .shiny-tab-panel { width: 100% !important; }
-      
-      /* Container full width */
-      .container-fluid { width: 100vw !important; padding: 0 !important; margin-left: calc(50% - 50vw); }
-      
-      /* Card full width - override bs4Dash defaults */
-      .card { 
-        width: 100% !important; 
-        margin: 0 !important; 
-        margin-bottom: 15px !important;
-        border-radius: 0.25rem;
-      }
-      .bs4-card { width: 100% !important; }
-      .card-header { width: 100%; }
-      .card-body { 
-        width: 100% !important; 
-        overflow-x: auto; 
-        box-sizing: border-box;
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
+        background: #f5f5f5;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
       }
       
-      /* DataTable full width */
-      .dataTables_wrapper { width: 100% !important; display: block !important; }
-      .dataTables_length { display: inline-block; }
-      .dataTables_filter { display: inline-block; float: right; }
-      .dataTables_info { display: block; margin-top: 10px; }
-      .dataTables_paginate { display: block; margin-top: 10px; }
-      .dataTable { width: 100% !important; }
-      .dataTables_scrollHeadInner { width: 100% !important; }
-      .dataTables_scrollBodyInner { width: 100% !important; }
-      
-      /* DT specific */
-      div.dataTables_wrapper div.dataTables_length { width: auto; }
-      div.dataTables_wrapper div.dataTables_filter { width: auto; }
-      div.dataTables_wrapper div.dataTables_info { width: auto; }
-      div.dataTables_wrapper div.dataTables_paginate { width: auto; }
-      
-      /* Mobile responsiveness */
-      @media (max-width: 768px) {
-        .dataTables_wrapper { overflow-x: auto; }
-        table.dataTable { font-size: 12px; }
-        .card-body table { font-size: 11px; }
+      /* Master scanner input - hidden but always active */
+      #master_scanner_input {
+        position: fixed;
+        top: -9999px;
+        left: -9999px;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
       }
       
-      /* Navbar nav */
-      .navbar-nav { margin-left: auto; }
-      .navbar-brand { margin-right: 20px; }
+      /* Batch Scanning Container */
+      .batch-scanning-container {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        background: #FFFFFF;
+      }
+      
+      /* Batch header */
+      .batch-header {
+        background: linear-gradient(135deg, #26A69A 0%, #00A19A 100%);
+        color: white;
+        padding: 30px 20px;
+        text-align: center;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      }
+      
+      .batch-header h1 {
+        font-size: 56px;
+        margin: 0;
+        font-weight: 700;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+      }
+      
+      /* Last scanned - massive display */
+      .last-scanned-box {
+        background: #f5f5f5;
+        padding: 25px;
+        text-align: center;
+        border-bottom: 2px solid #ddd;
+      }
+      
+      .last-scanned-box .label {
+        font-size: 16px;
+        color: #999;
+        margin: 0;
+      }
+      
+      .last-scanned-box .value {
+        font-size: 72px;
+        font-weight: 700;
+        color: #00A19A;
+        margin: 10px 0 0 0;
+        font-family: 'Courier New', monospace;
+        letter-spacing: 4px;
+      }
+      
+      /* Batch list - scrollable */
+      .batch-list-container {
+        flex: 1;
+        overflow-y: auto;
+        padding: 20px;
+      }
+      
+      .batch-item {
+        background: white;
+        border: 2px solid #ddd;
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 12px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        animation: slideIn 0.4s ease-out;
+      }
+      
+      .batch-item.success {
+        border-color: #26A69A;
+        background: rgba(38, 166, 154, 0.05);
+      }
+      
+      @keyframes slideIn {
+        from {
+          transform: translateY(20px);
+          opacity: 0;
+        }
+        to {
+          transform: translateY(0);
+          opacity: 1;
+        }
+      }
+      
+      .batch-item-id {
+        font-size: 24px;
+        font-weight: 700;
+        font-family: 'Courier New', monospace;
+        color: #00A19A;
+      }
+      
+      .batch-item-time {
+        font-size: 14px;
+        color: #999;
+      }
+      
+      .batch-item-checkmark {
+        font-size: 32px;
+        color: #26A69A;
+      }
+      
+      /* Batch counter */
+      .batch-counter {
+        background: white;
+        border-top: 2px solid #ddd;
+        padding: 20px;
+        text-align: center;
+      }
+      
+      .batch-counter .count {
+        font-size: 48px;
+        font-weight: 700;
+        color: #00A19A;
+        margin: 0;
+      }
+      
+      .batch-counter .label {
+        font-size: 16px;
+        color: #999;
+        margin: 5px 0 0 0;
+      }
+      
+      /* Invalid/error warnings */
+      .invalid-warning {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: #EF5350;
+        color: white;
+        padding: 40px;
+        border-radius: 12px;
+        text-align: center;
+        z-index: 2000;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        animation: slideDown 0.3s ease-out;
+        min-width: 80vw;
+        max-width: 400px;
+      }
+      
+      .invalid-warning h2 {
+        font-size: 48px;
+        margin: 0 0 15px 0;
+      }
+      
+      .invalid-warning p {
+        font-size: 24px;
+        margin: 10px 0;
+      }
+      
+      @keyframes slideDown {
+        from {
+          transform: translate(-50%, -150%);
+          opacity: 0;
+        }
+        to {
+          transform: translate(-50%, -50%);
+          opacity: 1;
+        }
+      }
+      
+      /* Success flash */
+      .success-flash {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: linear-gradient(135deg, #26A69A 0%, #00A19A 100%);
+        color: white;
+        padding: 40px;
+        border-radius: 12px;
+        text-align: center;
+        z-index: 2000;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        animation: successFlash 0.6s ease-in-out;
+        min-width: 80vw;
+        max-width: 400px;
+      }
+      
+      .success-flash h2 {
+        font-size: 48px;
+        margin: 0 0 15px 0;
+      }
+      
+      .success-flash p {
+        font-size: 32px;
+        margin: 10px 0;
+        font-family: 'Courier New', monospace;
+      }
+      
+      @keyframes successFlash {
+        0% { transform: translate(-50%, -50%) scale(0.8); opacity: 0; }
+        50% { transform: translate(-50%, -50%) scale(1.05); opacity: 1; }
+        100% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
+      }
+      
+      /* Label generation tab styles */
+      .label-gen-tab {
+        padding: 20px 40px;
+      }
+      
+      .label-gen-container {
+        display: grid;
+        grid-template-columns: 1fr 400px;
+        gap: 30px;
+      }
+      
+      .label-gen-inputs {
+        flex: 1;
+      }
+      
+      .label-gen-section {
+        background: white;
+        border: 2px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 20px;
+      }
+      
+      .label-gen-section h4 {
+        margin: 0 0 15px 0;
+        color: #00A19A;
+        font-weight: 700;
+        font-size: 16px;
+        display: flex;
+        align-items: center;
+      }
+      
+      .label-gen-section .section-num {
+        background: #00A19A;
+        color: white;
+        border-radius: 50%;
+        width: 28px;
+        height: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        margin-right: 12px;
+        font-size: 14px;
+      }
+      
+      .label-gen-example {
+        background: #f5f5f5;
+        padding: 12px;
+        border-radius: 4px;
+        font-family: 'Courier New', monospace;
+        font-size: 14px;
+        color: #00A19A;
+        margin-top: 10px;
+        font-weight: 700;
+      }
+      
+      .reference-panel {
+        background: white;
+        border: 2px solid #ddd;
+        border-radius: 8px;
+        padding: 15px;
+        position: sticky;
+        top: 20px;
+        max-height: 90vh;
+        overflow-y: auto;
+      }
+      
+      .reference-panel h4 {
+        margin: 0 0 15px 0;
+        font-size: 14px;
+        font-weight: 700;
+        color: #333;
+        text-transform: uppercase;
+        border-bottom: 2px solid #00A19A;
+        padding-bottom: 10px;
+      }
+      
+      .reference-section {
+        margin-bottom: 18px;
+      }
+      
+      .reference-section:last-child {
+        margin-bottom: 0;
+      }
+      
+      .reference-title {
+        font-size: 12px;
+        font-weight: 700;
+        color: #00A19A;
+        margin-bottom: 8px;
+        text-transform: uppercase;
+      }
+      
+      .reference-item {
+        font-size: 12px;
+        padding: 6px 0;
+        border-bottom: 1px solid #f0f0f0;
+        display: flex;
+        justify-content: space-between;
+      }
+      
+      .reference-item:last-child {
+        border-bottom: none;
+      }
+      
+      .reference-abbrev {
+        font-weight: 700;
+        color: #00A19A;
+        font-family: 'Courier New', monospace;
+        min-width: 35px;
+      }
+      
+      .reference-desc {
+        flex: 1;
+        color: #666;
+        margin-left: 8px;
+        font-size: 11px;
+      }
+      
+      .full-id-example {
+        background: #e3f2fd;
+        border-left: 4px solid #2196F3;
+        padding: 12px;
+        margin-top: 15px;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+      
+      .full-id-example .label {
+        font-weight: 700;
+        color: #1976D2;
+      }
+      
+      .full-id-example .value {
+        font-family: 'Courier New', monospace;
+        font-weight: 700;
+        color: #00A19A;
+        margin-top: 6px;
+      }
     "))
   ),
   
-  navbarPage(
-    title = "Chang Lab LIMS",
-    position = "static-top",
-    collapsible = TRUE,
-    theme = bs_theme(
-      version = 4,
-      preset = "minty",
-      bg = "#FFFFFF",
-      fg = "#1C1C1C",
-      primary = "#00A19A",
-      secondary = "#78909C",
-      success = "#26A69A",
-      info = "#009688",
-      warning = "#FFA726",
-      danger = "#EF5350"
-    ),
+  # Hidden scanner input - only on batch scanning tab
+  textInput(
+    inputId = "master_scanner_input",
+    label = NULL,
+    placeholder = "Scanner input (hidden)",
+    value = ""
+  ),
   
-  tabPanel(
-    "Home",
-    div(style = "padding: 20px 40px; min-height: 100vh;",
-      bs4Card(style = "width: 100%;",
-        title = "About This System",
-        closable = FALSE,
-        collapsible = FALSE,
-        status = "teal",
-        solidHeader = TRUE,
-        p(
-          "The Chang Lab Laboratory Information Management System (LIMS) is a comprehensive platform designed to streamline laboratory operations and sample tracking. Built for the Chang Lab, this system enables efficient management of field sampling, lab check-ins, equipment tracking, and label generation for plant and equipment inventory."
+  # Two-tab navigation
+  navset_tab(
+    nav_panel(
+      "Batch Scanning",
+      div(
+        class = "batch-scanning-container",
+        
+        # Batch header
+        div(
+          class = "batch-header",
+          h1(textOutput("batch_header_display"))
+        ),
+        
+        # Last scanned display
+        div(
+          class = "last-scanned-box",
+          p(class = "label", "Last Scanned:"),
+          p(class = "value", textOutput("last_scanned_display"))
+        ),
+        
+        # Batch list - growing in real-time
+        div(
+          class = "batch-list-container",
+          uiOutput("batch_list_ui")
+        ),
+        
+        # Batch counter at bottom
+        div(
+          class = "batch-counter",
+          p(class = "count", textOutput("batch_count")),
+          p(class = "label", "samples scanned")
+        )
+      ),
+      
+      # Invalid code warning (overlay)
+      uiOutput("invalid_warning_ui"),
+      
+      # Success flash (overlay)
+      uiOutput("success_flash_ui")
+    ),
+    
+    nav_panel(
+      "Create Site",
+      div(
+        class = "label-gen-tab",
+        h2("Register New Sampling Site"),
+        h4(style = "color: #666; margin: 0 0 30px 0;", "Two-step process: Create before field trip, add coordinates after"),
+        
+        # ============ STEP 1: Create Site (ID + Description) ============
+        div(
+          class = "label-gen-section",
+          style = "background: #e8f5e9; border-left: 6px solid #4caf50; margin-bottom: 30px;",
+          h3(style = "margin: 0 0 15px 0; color: #2e7d32;", "① Before Field Trip: Create Site"),
+          p(style = "color: #666; font-size: 13px; margin: 0 0 15px 0;",
+            "Create sampling site with ID and description. Coordinates added later after GPS data collection."
+          ),
+          
+          div(
+            style = "display: grid; grid-template-columns: 1fr 3fr; gap: 30px;",
+            
+            # Left: Create site form
+            div(
+              div(
+                style = "background: white; border: 2px solid #c8e6c9; border-radius: 8px; padding: 20px;",
+                h5(style = "color: #2e7d32; margin: 0 0 15px 0;", "️New Site"),
+                
+                textInput(
+                  inputId = "create_site_id",
+                  label = "Site ID",
+                  placeholder = "e.g., ST0001",
+                  width = "100%"
+                ),
+                
+                p(style = "color: #999; font-size: 12px; margin: 5px 0 15px 0;",
+                  "Format: ST + 4 digits"
+                ),
+                
+                textAreaInput(
+                  inputId = "create_site_description",
+                  label = "Site Description",
+                  placeholder = "Field location, region, habitat, etc.",
+                  rows = 4,
+                  width = "100%"
+                ),
+                
+                p(style = "color: #999; font-size: 12px; margin: 5px 0 20px 0;",
+                  "Describe the location and any relevant details"
+                ),
+                
+                actionButton(
+                  "btn_create_site",
+                  "✓ Create Site",
+                  class = "btn btn-success btn-lg",
+                  style = "width: 100%; padding: 12px; font-size: 16px;"
+                ),
+                
+                br(), br(),
+                
+                uiOutput("create_site_status")
+              )
+            ),
+            
+            # Right: Existing sites table
+            div(
+              h4(style = "margin: 0 0 15px 0; color: #2e7d32; font-weight: 700;", "📍 Your Sites"),
+              div(
+                style = "background: white; border: 2px solid #e0e0e0; border-radius: 8px; padding: 15px; max-height: 55vh; overflow-y: auto;",
+                DT::dataTableOutput("existing_sites_table", height = "100%")
+              )
+            )
+          )
+        ),
+        
+        # ============ STEP 2: Add Coordinates (After GPS Collection) ============
+        div(
+          class = "label-gen-section",
+          style = "background: #fff3e0; border-left: 6px solid #ff9800;",
+          h3(style = "margin: 0 0 15px 0; color: #e65100;", "② After Field Trip: Add Coordinates"),
+          p(style = "color: #666; font-size: 13px; margin: 0 0 15px 0;",
+            "Add GPS coordinates from your Garmin device for sites created above."
+          ),
+          
+          div(
+            style = "display: grid; grid-template-columns: 1fr 1fr; gap: 30px;",
+            
+            # Left: Add coordinates form
+            div(
+              div(
+                style = "background: white; border: 2px solid #ffe0b2; border-radius: 8px; padding: 20px;",
+                h5(style = "color: #e65100; margin: 0 0 15px 0;", "🗺️ Add GPS Data"),
+                
+                selectInput(
+                  inputId = "add_coord_site_id",
+                  label = "Select Site to Update",
+                  choices = c("Select..." = ""),
+                  width = "100%"
+                ),
+                
+                p(style = "color: #999; font-size: 12px; margin: 5px 0 15px 0;",
+                  "Only shows sites without coordinates"
+                ),
+                
+                textInput(
+                  inputId = "add_coord_latitude",
+                  label = "Latitude",
+                  placeholder = "e.g., 37.7749",
+                  width = "100%"
+                ),
+                
+                textInput(
+                  inputId = "add_coord_longitude",
+                  label = "Longitude",
+                  placeholder = "e.g., -122.4194",
+                  width = "100%"
+                ),
+                
+                p(style = "color: #999; font-size: 12px; margin: 10px 0 15px 0;",
+                  "From Garmin GPS data. Lat: -90 to 90, Lon: -180 to 180"
+                ),
+                
+                actionButton(
+                  "btn_add_coord",
+                  "✓ Add Coordinates",
+                  class = "btn btn-warning btn-lg",
+                  style = "width: 100%; padding: 12px; font-size: 16px; color: white;"
+                ),
+                
+                br(), br(),
+                
+                uiOutput("add_coord_status")
+              )
+            ),
+            
+            # Right: Sites needing coordinates
+            div(
+              h5(style = "color: #e65100; margin: 0 0 15px 0;", "⚠️ Sites Needing Coordinates"),
+              p(style = "color: #999; font-size: 12px; margin: 0 0 15px 0;",
+                "These sites were created but don't have GPS coordinates yet"
+              ),
+              div(
+                style = "background: white; border: 2px solid #ffe0b2; border-radius: 8px; padding: 15px; max-height: 40vh; overflow-y: auto; min-height: 250px;",
+                uiOutput("sites_needing_coords_list")
+              )
+            )
+          )
         )
       )
-    )
-  ),
-  
-  tabPanel(
-    "Field Entry",
-    div(style = "padding: 20px 40px; min-height: 100vh;",
-        
-        h2("Field Sampling Entry"),
-        
-        # Create new site section
-        bs4Card(
-          title = "New Site",
-          closable = FALSE,
-          collapsible = FALSE,
-          status = "info",
-          solidHeader = TRUE,
-          div(style = "display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin-bottom: 15px;",
-            textInput(
-              inputId = "site_name",
-              label = "Site name",
-              placeholder = "e.g., NTU campus"
-            ),
-            textInput(
-              inputId = "site_lat",
-              label = "Latitude",
-              placeholder = "e.g., 5678"
-            ),
-            textInput(
-              inputId = "site_long",
-              label = "Longitude",
-              placeholder = "e.g., 1234"
-            )
-          ),
-          actionButton(
-            inputId = "btn_create_site",
-            label = "Create Site",
-            class = "btn-success btn-sm"
-          ),
-          br(), br(),
-          verbatimTextOutput("site_creation_msg")
+    ),
+    
+    nav_panel(
+      "Generate Labels",
+      div(
+        class = "label-gen-tab",
+        h2("🏷️ Label Generation Workflow"),
+        p(style = "color: #666; font-size: 14px; margin: 0 0 30px 0;",
+          "Three-stage workflow: Pre-Sampling → Parts Processing → Sample Use"
         ),
         
-        br(),
-        
-        # Site Information table
-        bs4Card(
-          title = "Site Information",
-          closable = FALSE,
-          collapsible = FALSE,
-          status = "warning",
-          solidHeader = TRUE,
-          DT::dataTableOutput("sites_table")
-        )
-    )
-  ),
-  
-  tabPanel(
-    "Sample Check-In",
-    div(style = "padding: 20px 40px; min-height: 100vh;",
-        
-        h2("Sample Check-In (Mobile Scanner)"),
-        
-        bs4Card(
-          title = "Scan QR Code",
-          closable = FALSE,
-          collapsible = FALSE,
-          status = "info",
-          solidHeader = TRUE,
-          
-          p("Use your phone camera or QR scanner to scan the plant label QR code."),
-          p(strong("This will auto-upload the check-in data to the system.")),
-          
-          textInput(
-            inputId = "mobile_plant_id",
-            label = "Scanned Plant ID",
-            placeholder = "ST0001-P0001 (auto-filled when QR scanned)"
+        # ============ STAGE 1: PRE-SAMPLING LABELS ============
+        div(
+          class = "label-gen-section",
+          style = "background: #e8f5e9; border-left: 6px solid #4caf50;",
+          h3(style = "margin: 0 0 15px 0; color: #2e7d32;", "① PRE-FIELD SAMPLING"),
+          p(style = "color: #666; font-size: 13px; margin: 0 0 15px 0;",
+            "Generate labels BEFORE field sampling (2-segment IDs: Site + Sample Number)"
           ),
           
-          selectInput(
-            inputId = "mobile_fridge_loc",
-            label = "Equipment/Fridge Location",
-            choices = ""
-          ),
-          
-          actionButton(
-            inputId = "btn_mobile_checkin",
-            label = "Check In Sample",
-            class = "btn-success btn-lg"
-          ),
-          
-          br(), br(),
-          
-          uiOutput("mobile_result_message")
-        ),
-        
-        br(),
-        
-        bs4Card(
-          title = "Recent Mobile Check-Ins",
-          closable = FALSE,
-          collapsible = FALSE,
-          status = "success",
-          solidHeader = TRUE,
-          
-          DT::dataTableOutput("mobile_checkins_log")
-        )
-    )
-  ),
-  
-  tabPanel(
-    "Label Generation",
-    div(style = "padding: 20px 40px; min-height: 100vh;",
-        h2("Batch Label Generation"),
-        
-        bs4Card(
-          title = "Generate Labels for Site",
-          closable = FALSE,
-          collapsible = FALSE,
-          status = "info",
-          solidHeader = TRUE,
-          
-          div(style = "display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-bottom: 15px;",
-            selectInput(
-              inputId = "label_site_select",
-              label = "Select Site",
-              choices = ""
+          div(
+            style = "display: grid; grid-template-columns: 1fr 1fr; gap: 15px;",
+            
+            # Plant samples
+            div(
+              style = "border: 2px solid #26A69A; border-radius: 8px; padding: 15px; background: white;",
+              h5(style = "margin: 0 0 12px 0; color: #00A19A; font-weight: 700;", "🌱 Plant Samples"),
+              selectInput(
+                inputId = "presamp_site_plant",
+                label = "Site",
+                choices = c("Select..." = ""),
+                width = "100%"
+              ),
+              sliderInput(
+                inputId = "presamp_plant_count",
+                label = "Number of samples",
+                min = 1,
+                max = 20,
+                value = 5,
+                step = 1,
+                width = "100%"
+              ),
+              dateInput(
+                inputId = "presamp_plant_date",
+                label = "Label Date",
+                value = Sys.Date(),
+                width = "100%"
+              ),
+              actionButton(
+                "btn_presamp_plant",
+                "Generate Plant Sample Labels",
+                class = "btn btn-success btn-block",
+                style = "width: 100%; margin-top: 12px;"
+              ),
+              div(class = "label-gen-example", "Example: ST0001-P0001")
             ),
             
-            numericInput(
-              inputId = "label_start_index",
-              label = "Start Plant Index",
-              value = 1,
-              min = 1
-            ),
-            
-            numericInput(
-              inputId = "label_end_index",
-              label = "End Plant Index",
-              value = 20,
-              min = 1
-            ),
-            
-            selectInput(
-              inputId = "label_format",
-              label = "Output Format",
-              choices = c("PNG (Individual)" = "png", 
-                         "PDF (Printable)" = "pdf")
+            # Soil samples
+            div(
+              style = "border: 2px solid #FF9800; border-radius: 8px; padding: 15px; background: white;",
+              h5(style = "margin: 0 0 12px 0; color: #FF9800; font-weight: 700;", "🌍 Soil Samples"),
+              selectInput(
+                inputId = "presamp_site_soil",
+                label = "Site",
+                choices = c("Select..." = ""),
+                width = "100%"
+              ),
+              sliderInput(
+                inputId = "presamp_soil_count",
+                label = "Number of samples",
+                min = 0,
+                max = 20,
+                value = 0,
+                step = 1,
+                width = "100%"
+              ),
+              dateInput(
+                inputId = "presamp_soil_date",
+                label = "Label Date",
+                value = Sys.Date(),
+                width = "100%"
+              ),
+              actionButton(
+                "btn_presamp_soil",
+                "Generate Soil Sample Labels",
+                class = "btn btn-warning btn-block",
+                style = "width: 100%; margin-top: 12px; color: white;"
+              ),
+              div(class = "label-gen-example", "Example: ST0001-S0001")
             )
           ),
           
-          actionButton(
-            inputId = "btn_generate_labels",
-            label = "Generate Labels",
-            class = "btn-primary btn-lg"
-          ),
-          
-          br(), br(),
-          
-          uiOutput("label_generation_status")
-        )
-    )
-  ),
-  
-  tabPanel(
-    "Equipment Labels",
-    div(style = "padding: 20px 40px; min-height: 100vh;",
-        
-        h2("Equipment QR Labels"),
-        
-        bs4Card(
-          title = "Equipment Inventory with Labels",
-          closable = FALSE,
-          collapsible = FALSE,
-          status = "success",
-          solidHeader = TRUE,
-          
-          DT::dataTableOutput("equipment_inventory_table")
+          uiOutput("presamp_status")
         ),
         
         br(),
         
-        bs4Card(
-          title = "Equipment QR Code Labels",
-          closable = FALSE,
-          collapsible = FALSE,
-          status = "info",
-          solidHeader = TRUE,
+        # ============ STAGE 2: PARTS PROCESSING LABELS ============
+        div(
+          class = "label-gen-section",
+          style = "background: #fff3e0; border-left: 6px solid #ff9800;",
+          h3(style = "margin: 0 0 15px 0; color: #e65100;", "② PROCESS INTO PARTS"),
+          p(style = "color: #666; font-size: 13px; margin: 0 0 15px 0;",
+            "Generate labels before processing samples into individual parts (3-segment IDs: Site + Sample + Part)"
+          ),
           
-          p("All equipment QR codes:"),
+          # Sample ID input with autocomplete
+          fluidRow(
+            column(6,
+              selectInput(
+                inputId = "parts_sample_id",
+                label = "Sample ID to process",
+                choices = c("Select collected sample..." = ""),
+                width = "100%"
+              ),
+              p(style = "color: #999; font-size: 12px; margin: 5px 0 0 0;",
+                "Only shows collected/processed 2-segment samples"
+              )
+            ),
+            column(6,
+              p(style = "color: #999; font-size: 12px; margin: 0 0 8px 0; font-weight: 700;", "Part Quantities:"),
+              fluidRow(
+                column(3,
+                  div(
+                    style = "border: 1px solid #ddd; border-radius: 6px; padding: 10px; text-align: center;",
+                    h6(style = "margin: 0 0 6px 0; color: #00A19A; font-size: 12px;", "SH"),
+                    numericInput(inputId = "parts_sh_count", label = NULL, value = 0, min = 0, width = "100%")
+                  )
+                ),
+                column(3,
+                  div(
+                    style = "border: 1px solid #ddd; border-radius: 6px; padding: 10px; text-align: center;",
+                    h6(style = "margin: 0 0 6px 0; color: #00A19A; font-size: 12px;", "RT"),
+                    numericInput(inputId = "parts_rt_count", label = NULL, value = 0, min = 0, width = "100%")
+                  )
+                ),
+                column(3,
+                  div(
+                    style = "border: 1px solid #ddd; border-radius: 6px; padding: 10px; text-align: center;",
+                    h6(style = "margin: 0 0 6px 0; color: #00A19A; font-size: 12px;", "ND"),
+                    numericInput(inputId = "parts_nd_count", label = NULL, value = 0, min = 0, width = "100%")
+                  )
+                ),
+                column(3,
+                  div(
+                    style = "border: 1px solid #ddd; border-radius: 6px; padding: 10px; text-align: center;",
+                    h6(style = "margin: 0 0 6px 0; color: #00A19A; font-size: 12px;", "LF"),
+                    numericInput(inputId = "parts_lf_count", label = NULL, value = 0, min = 0, width = "100%")
+                  )
+                )
+              )
+            )
+          ),
+          
+          # Date input below
+          dateInput(
+            inputId = "parts_date",
+            label = "Label Date",
+            value = Sys.Date(),
+            width = "100%"
+          ),
+          
           br(),
           
-          uiOutput("equipment_qr_labels_display")
-        )
-    )
-  ),
-  
-  tabPanel(
-    "Inventory View",
-    div(style = "padding: 20px 40px; min-height: 100vh;",
-        h2("Inventory View"),
-        
-        bs4Card(
-          title = "All Plants",
-          closable = FALSE,
-          collapsible = FALSE,
-          status = "primary",
-          solidHeader = TRUE,
+          actionButton(
+            "btn_parts_generate",
+            "Generate Part Labels",
+            class = "btn btn-primary btn-lg",
+            style = "width: 100%; padding: 12px; font-size: 16px;"
+          ),
           
-          DT::dataTableOutput("inventory_table")
+          div(class = "label-gen-example", 
+            "Example: ST0001-P0001-SH001, ST0001-P0001-SH002, ST0001-P0001-RT001, etc."
+          ),
+          
+          uiOutput("parts_status")
         ),
         
         br(),
         
-        bs4Card(
-          title = "Processing Records",
-          closable = FALSE,
-          collapsible = FALSE,
-          status = "secondary",
-          solidHeader = TRUE,
+        # ============ STAGE 3: SAMPLE USE LABELS ============
+        div(
+          class = "label-gen-section",
+          style = "background: #e3f2fd; border-left: 6px solid #2196f3;",
+          h3(style = "margin: 0 0 15px 0; color: #0d47a1;", "③ SAMPLE USE/PURPOSE"),
+          p(style = "color: #666; font-size: 13px; margin: 0 0 15px 0;",
+            "Generate full labels for use processing (4-segment IDs: Site + Sample + Part + Use)"
+          ),
           
-          DT::dataTableOutput("processing_table")
+          fluidRow(
+            column(6,
+              textInput(
+                inputId = "use_part_id",
+                label = "Part ID to process",
+                placeholder = "e.g., ST0001-P0001-SH001",
+                width = "100%"
+              ),
+              
+              p(style = "color: #999; font-size: 12px; margin: 5px 0 15px 0;",
+                "Enter the 3-segment part ID from previous stage"
+              )
+            ),
+            column(6,
+              dateInput(
+                inputId = "use_date",
+                label = "Label Date",
+                value = Sys.Date(),
+                width = "100%"
+              )
+            )
+          ),
+          
+          p(style = "color: #999; font-size: 12px; margin: 10px 0 15px 0;",
+            "Specify quantities for each use type:"
+          ),
+          
+          fluidRow(
+            column(3,
+              div(
+                style = "border: 1px solid #ddd; border-radius: 6px; padding: 12px; text-align: center;",
+                h6(style = "margin: 0 0 8px 0; color: #1976D2;", "GW (Growth)"),
+                numericInput(inputId = "use_gw_count", label = NULL, value = 0, min = 0, width = "100%")
+              )
+            ),
+            column(3,
+              div(
+                style = "border: 1px solid #ddd; border-radius: 6px; padding: 12px; text-align: center;",
+                h6(style = "margin: 0 0 8px 0; color: #1976D2;", "DE (DNA)"),
+                numericInput(inputId = "use_de_count", label = NULL, value = 0, min = 0, width = "100%")
+              )
+            ),
+            column(3,
+              div(
+                style = "border: 1px solid #ddd; border-radius: 6px; padding: 12px; text-align: center;",
+                h6(style = "margin: 0 0 8px 0; color: #1976D2;", "RE (RNA)"),
+                numericInput(inputId = "use_re_count", label = NULL, value = 0, min = 0, width = "100%")
+              )
+            ),
+            column(3,
+              div(
+                style = "border: 1px solid #ddd; border-radius: 6px; padding: 12px; text-align: center;",
+                h6(style = "margin: 0 0 8px 0; color: #1976D2;", "IS/GS"),
+                numericInput(inputId = "use_other_count", label = NULL, value = 0, min = 0, width = "100%")
+              )
+            )
+          ),
+          
+          br(),
+          
+          actionButton(
+            "btn_use_generate",
+            "Generate Use Labels",
+            class = "btn btn-primary btn-lg",
+            style = "width: 100%; padding: 12px; font-size: 16px;"
+          ),
+          
+          div(class = "label-gen-example", 
+            "Example: ST0001-P0001-SH001-GW01, ST0001-P0001-SH001-DE01, etc."
+          ),
+          
+          uiOutput("use_status")
+        ),
+        
+        br()
+      )
+    ),
+    
+    # ============ INVENTORY TAB ============
+    nav_panel(
+      "Inventory",
+      div(
+        class = "label-gen-tab",
+        h2("📦 Sample Inventory & Status"),
+        p(style = "color: #666; font-size: 14px; margin: 0 0 20px 0;",
+          "Track sample processing status from field collection through sample use"
+        ),
+        
+        div(
+          style = "display: flex; gap: 15px; margin-bottom: 20px;",
+          div(style = "background: #e8f5e9; padding: 12px 15px; border-radius: 6px; flex: 1;",
+            div(style = "font-size: 12px; color: #666;", "Samples with labels"),
+            div(style = "font-size: 24px; font-weight: 700; color: #2e7d32;", textOutput("inventory_total_count"))
+          ),
+          div(style = "background: #fff3e0; padding: 12px 15px; border-radius: 6px; flex: 1;",
+            div(style = "font-size: 12px; color: #666;", "Processing stage"),
+            div(style = "font-size: 18px; font-weight: 700; color: #e65100;", "Multi-level")
+          ),
+          div(style = "background: #e3f2fd; padding: 12px 15px; border-radius: 6px; flex: 1;",
+            div(style = "font-size: 12px; color: #666;", "Overall Status"),
+            div(style = "font-size: 18px; font-weight: 700; color: #0d47a1;", "Active")
+          )
+        ),
+        
+        # Inventory table with hierarchical view
+        div(
+          style = "background: white; border: 2px solid #e0e0e0; border-radius: 8px; padding: 20px;",
+          
+          # Search and filter controls
+          fluidRow(
+            column(6,
+              textInput(
+                inputId = "inventory_search",
+                label = "Search by Site or Sample ID",
+                placeholder = "e.g., ST0001 or ST0001-P0001",
+                width = "100%"
+              )
+            ),
+            column(6,
+              selectInput(
+                inputId = "inventory_status_filter",
+                label = "Filter by Status",
+                choices = c("All" = "", "Created" = "created", "Stored" = "stored", 
+                           "Processing" = "processing", "Complete" = "complete"),
+                width = "100%"
+              )
+            )
+          ),
+          
+          br(),
+          
+          # Inventory table
+          DT::dataTableOutput("inventory_table", height = "auto")
         )
+      )
     )
   )
-)
 )
 
-# Server Logic
+# ============================================================
+# SERVER LOGIC
+# ============================================================
+
 server <- function(input, output, session) {
   
-  # Reactive values
-  values <- reactiveValues(
-    current_sample = NULL,
-    current_fridge = NULL,
-    plant_count = 0
+  # Initialize batch scanning state
+  batch_state <- reactiveValues(
+    batch_samples = character(),
+    last_scanned = "",
+    show_invalid = FALSE,
+    invalid_code = "",
+    show_success = FALSE,
+    show_success_code = ""
   )
   
-  # ===== FIELD ENTRY SERVER =====
+  # Plant ID regex pattern - foolproof validation
+  plant_id_pattern <- "^ST\\d{4}-P\\d{4}$"
   
-  # Create new site
-  observeEvent(input$btn_create_site, {
-    if (input$site_name == "") {
-      output$site_creation_msg <- renderText("Please enter a site name")
-      return()
-    }
-    
-    if (input$site_lat == "") {
-      output$site_creation_msg <- renderText("Please enter latitude")
-      return()
-    }
-    
-    if (input$site_long == "") {
-      output$site_creation_msg <- renderText("Please enter longitude")
-      return()
-    }
-    
-    site_id <- generate_site_id()
-    con <- poolCheckout(pool)
-    
-    dbExecute(con, 
-      "INSERT INTO Sites (site_id, site_name, site_lat, site_long) VALUES (?, ?, ?, ?)",
-      params = list(site_id, input$site_name, input$site_lat, input$site_long)
-    )
-    
-    poolReturn(con)
-    
-    output$site_creation_msg <- renderText(
-      paste("✓ Site created successfully! Site ID:", site_id)
-    )
-    
-    # Update site selector
-    updateSelectInput(session, "select_site_for_plants",
-      choices = get_site_choices()
-    )
-  })
+  # ============================================================
+  # BATCH SCANNING TAB
+  # ============================================================
   
-  # Get available sites for dropdown
-  get_site_choices <- function() {
-    con <- poolCheckout(pool)
-    sites <- dbGetQuery(con, 
-      "SELECT site_id, site_name FROM Sites ORDER BY site_id DESC")
-    poolReturn(con)
-    
-    if (nrow(sites) == 0) return(character(0))
-    setNames(sites$site_id, 
-      paste0(sites$site_id, " - ", sites$site_name))
-  }
-  
-  # Get equipment choices for fridge location dropdown
-  get_equipment_choices <- function() {
-    con <- poolCheckout(pool)
-    equipment <- dbGetQuery(con, 
-      "SELECT equipment_id, character_name FROM Equipment ORDER BY equipment_id")
-    poolReturn(con)
-    
-    if (nrow(equipment) == 0) return(character(0))
-    setNames(equipment$equipment_id, 
-      paste0(equipment$equipment_id, " | ", equipment$character_name))
-  }
-  
-  # Render sites table
-  output$sites_table <- DT::renderDataTable({
-    con <- poolCheckout(pool)
-    sites <- dbGetQuery(con, "SELECT * FROM Sites ORDER BY site_id DESC")
-    poolReturn(con)
-    
-    DT::datatable(sites, options = list(pageLength = 5))
-  })
-  
-  # Update site selector dynamically
+  # Update site choices on load and when sites change
   observe({
-    updateSelectInput(session, "select_site_for_plants",
-      choices = get_site_choices()
-    )
-  })
-  
-  # Generate plant entry forms
-  observeEvent(input$btn_add_plants, {
-    if (input$select_site_for_plants == "") {
-      showNotification("Please select a site first", type = "error")
-      return()
+    # Trigger on site creation or coordinate addition
+    input$btn_create_site
+    input$btn_add_coord
+    
+    con <- poolCheckout(pool)
+    sites <- dbGetQuery(con, "SELECT site_id FROM Sites ORDER BY site_id")
+    poolReturn(con)
+    
+    if (nrow(sites) > 0) {
+      site_choices <- c("Select a site" = "", setNames(sites$site_id, sites$site_id))
+      updateSelectInput(session, "label_site_select", choices = site_choices)
+      updateSelectInput(session, "presamp_site_plant", choices = site_choices)
+      updateSelectInput(session, "presamp_site_soil", choices = site_choices)
     }
-    
-    values$plant_count <- input$num_plants
   })
   
-  # Render dynamic plant entry forms
-  output$plant_entry_forms <- renderUI({
-    if (values$plant_count == 0) return(NULL)
+  # Update sites needing coordinates dropdown
+  observe({
+    input$btn_create_site
+    input$btn_add_coord
     
-    lapply(1:values$plant_count, function(i) {
-      fluidRow(
-        column(3, textInput(paste0("species_", i), paste("Plant", i, "- Species"))),
-        column(3, selectInput(paste0("health_", i), "Health Status",
-          choices = c("Healthy", "Stressed", "Diseased"))),
-        column(3, textInput(paste0("fridge_", i), "Fridge Location")),
-        column(2, tags$br(),
-          actionButton(paste0("btn_save_plant_", i), "Save", class = "btn-sm btn-success"))
-      )
-    })
+    con <- poolCheckout(pool)
+    # Sites without coordinates (site_lat is NULL)
+    sites_needing <- dbGetQuery(con, 
+      "SELECT site_id FROM Sites WHERE site_lat IS NULL OR site_lat = '' ORDER BY site_id"
+    )
+    poolReturn(con)
+    
+    if (nrow(sites_needing) > 0) {
+      site_choices <- c("Select..." = "", setNames(sites_needing$site_id, sites_needing$site_id))
+      updateSelectInput(session, "add_coord_site_id", choices = site_choices)
+    } else {
+      updateSelectInput(session, "add_coord_site_id", choices = c("Select..." = ""))
+    }
   })
   
-  # Save individual plants
-  observeEvent(input$btn_add_plants, {
-    for (i in 1:values$plant_count) {
-      local({
-        idx <- i
-        observeEvent(input[[paste0("btn_save_plant_", idx)]], {
-          plant_id <- generate_plant_id(input$select_site_for_plants)
-          species <- input[[paste0("species_", idx)]]
-          health <- input[[paste0("health_", idx)]]
-          fridge <- input[[paste0("fridge_", idx)]]
-          
-          if (species == "" || is.null(species)) {
-            showNotification("Please enter species name", type = "error")
-            return()
-          }
-          
-          con <- poolCheckout(pool)
-          dbExecute(con,
-            "INSERT INTO Plants (plant_id, site_id, species, health_status, fridge_loc) 
-             VALUES (?, ?, ?, ?, ?)",
-            params = list(plant_id, input$select_site_for_plants, species, health, fridge)
-          )
-          poolReturn(con)
-          
-          showNotification(
-            paste("Plant saved:", plant_id),
-            type = "message"
+  # Generate sites needing coordinates list
+  output$sites_needing_coords_list <- renderUI({
+    input$btn_create_site
+    input$btn_add_coord
+    
+    con <- poolCheckout(pool)
+    sites_needing <- dbGetQuery(con, 
+      "SELECT site_id, site_name FROM Sites WHERE site_lat IS NULL OR site_lat = '' ORDER BY site_id"
+    )
+    poolReturn(con)
+    
+    if (nrow(sites_needing) > 0) {
+      div(
+        lapply(1:nrow(sites_needing), function(i) {
+          div(
+            style = "padding: 12px; border-bottom: 1px solid #f0f0f0; font-size: 13px;",
+            div(style = "font-weight: 700; color: #e65100;", sites_needing$site_id[i]),
+            div(style = "color: #999; font-size: 12px; margin-top: 4px;", sites_needing$site_name[i])
           )
         })
-      })
-    }
-  })
-  
-  # Generate and display QR code
-  generate_qr_code <- function(plant_id) {
-    tryCatch({
-      qr_file <- paste0("www/qr_", plant_id, ".png")
-      if (!file.exists("www")) dir.create("www")
-      
-      qr_obj <- qr_code(plant_id)
-      png(qr_file, width = 400, height = 400)
-      plot(qr_obj)
-      dev.off()
-    }, error = function(e) {
-      cat("QR code generation error:", e$message, "\n")
-    })
-  }
-  
-  # Display scan results
-  output$scan_result_ui <- renderUI({
-    if (is.null(values$current_sample)) return(NULL)
-    
-    bs4Card(
-      title = "Current Scan",
-      closable = FALSE,
-      collapsible = FALSE,
-      status = "warning",
-      
-      p(strong("Sample ID:"), values$current_sample),
-      if (!is.null(values$current_fridge)) {
-        p(strong("Fridge Location:"), values$current_fridge)
-      }
-    )
-  })
-  
-  # Display QR code
-  output$qr_code_display <- renderUI({
-    if (is.null(values$current_sample)) return(NULL)
-    
-    bs4Card(
-      title = "QR Code",
-      closable = FALSE,
-      collapsible = FALSE,
-      status = "info",
-      
-      img(src = paste0("qr_", values$current_sample, ".png"),
-        width = "250px", height = "250px")
-    )
-  })
-  
-  # ===== INVENTORY VIEW SERVER =====
-  
-  # Inventory table - all plants
-  output$inventory_table <- DT::renderDataTable({
-    input$btn_add_plants # Refresh when new plants added
-    
-    con <- poolCheckout(pool)
-    inventory <- dbGetQuery(con,
-      "SELECT plant_id, site_id, species, health_status as 'Health Status', 
-              fridge_loc as 'Fridge Location', date_created as 'Created'
-       FROM Plants
-       ORDER BY plant_id DESC"
-    )
-    poolReturn(con)
-    
-    DT::datatable(
-      inventory,
-      options = list(
-        pageLength = 15,
-        columnDefs = list(list(width = "150px", targets = "_all"))
-      ),
-      filter = "top"
-    )
-  })
-  
-  # Processing records table
-  output$processing_table <- DT::renderDataTable({
-    con <- poolCheckout(pool)
-    processing <- dbGetQuery(con,
-      "SELECT proc_id, plant_id, type, date, technician, notes
-       FROM Processing
-       ORDER BY date DESC
-       LIMIT 50"
-    )
-    poolReturn(con)
-    
-    if (nrow(processing) == 0) {
-      return(data.frame(Message = "No processing records yet"))
-    }
-    
-    DT::datatable(
-      processing,
-      options = list(pageLength = 10)
-    )
-  })
-  
-  # ===== MOBILE SCAN SERVER =====
-  
-  # Update label site selector
-  observe({
-    updateSelectInput(session, "label_site_select",
-      choices = get_site_choices()
-    )
-  })
-  
-  # Update equipment choices for fridge location
-  observe({
-    updateSelectInput(session, "mobile_fridge_loc",
-      choices = get_equipment_choices()
-    )
-  })
-  
-  # Mobile check-in button
-  observeEvent(input$btn_mobile_checkin, {
-    if (input$mobile_plant_id == "") {
-      showNotification("Please enter or scan a plant ID", type = "error")
-      return()
-    }
-    
-    con <- poolCheckout(pool)
-    
-    # Check for duplicate/existing plant
-    plant_check <- dbGetQuery(con,
-      paste0("SELECT * FROM Plants WHERE plant_id = '", input$mobile_plant_id, "'")
-    )
-    
-    if (nrow(plant_check) == 0) {
-      poolReturn(con)
-      showNotification(
-        paste("Error: Plant ID", input$mobile_plant_id, "not found in database"),
-        type = "error"
       )
-      return()
+    } else {
+      div(
+        style = "padding: 20px; text-align: center; color: #4caf50;",
+        p(style = "font-size: 14px; font-weight: 700;", "✓ All sites have coordinates!"),
+        p(style = "font-size: 12px; color: #999;", "Ready to generate labels.")
+      )
+    }
+  })
+  
+  # Master scanner input handler - foolproof plant ID validation
+  observeEvent(input$master_scanner_input, {
+    scan_input <- trimws(input$master_scanner_input)
+    
+    if (nchar(scan_input) == 0) return()
+    
+    # Handle multi-line input
+    scans <- strsplit(scan_input, "\n")[[1]]
+    
+    for (scan in scans) {
+      scan <- trimws(scan)
+      if (nchar(scan) == 0) next
+      
+      # Check for exit code
+      if (scan == "FINISH" || scan == "EXIT") {
+        # Reset batch
+        batch_state$batch_samples <- character()
+        batch_state$last_scanned <- ""
+        shinyjs::runjs("playStartBeep();")
+        batch_state$show_success <- TRUE
+        batch_state$show_success_code <- "SESSION ENDED"
+        shinyjs::delay(600, {
+          batch_state$show_success <- FALSE
+        })
+        next
+      }
+      
+      # Validate plant ID format (FOOLPROOF)
+      if (grepl(plant_id_pattern, scan)) {
+        # Check if plant exists in database (FOOLPROOF)
+        con <- poolCheckout(pool)
+        plant_check <- dbGetQuery(con, 
+          paste0("SELECT * FROM Plants WHERE plant_id = '", scan, "'"))
+        poolReturn(con)
+        
+        if (nrow(plant_check) > 0) {
+          # Valid plant - save to Processing table
+          save_batch_scan(scan)
+          
+          # Add to batch list
+          batch_state$batch_samples <- c(scan, batch_state$batch_samples)
+          batch_state$last_scanned <- scan
+          
+          # Show success
+          batch_state$show_success <- TRUE
+          batch_state$show_success_code <- scan
+          shinyjs::runjs("playSuccessBeep();")
+          
+          shinyjs::delay(600, {
+            batch_state$show_success <- FALSE
+          })
+        } else {
+          # Plant format valid but not in database
+          batch_state$show_invalid <- TRUE
+          batch_state$invalid_code <- paste(scan, "\n(not found)")
+          shinyjs::runjs("playErrorBeep();")
+          
+          shinyjs::delay(1500, {
+            batch_state$show_invalid <- FALSE
+          })
+        }
+      } else {
+        # Invalid plant ID format
+        batch_state$show_invalid <- TRUE
+        batch_state$invalid_code <- scan
+        shinyjs::runjs("playErrorBeep();")
+        
+        shinyjs::delay(1500, {
+          batch_state$show_invalid <- FALSE
+        })
+      }
     }
     
-    # Update fridge location
-    dbExecute(con,
-      "UPDATE Plants SET fridge_loc = ? WHERE plant_id = ?",
-      params = list(input$mobile_fridge_loc, input$mobile_plant_id)
-    )
+    # Clear input for next scan
+    shinyjs::runjs("document.getElementById('master_scanner_input').value = '';")
+  }, priority = 10)
+  
+  # Database operation to save batch scan
+  save_batch_scan <- function(plant_id) {
+    con <- poolCheckout(pool)
     
-    # Log to processing table
-    proc_id <- paste0("PROC", gsub("-|:", "", Sys.time()))
+    proc_id <- generate_proc_id()
     dbExecute(con,
       "INSERT INTO Processing (proc_id, plant_id, type, date, notes) 
-       VALUES (?, ?, ?, ?, ?)",
-      params = list(proc_id, input$mobile_plant_id, "Mobile_Checkin", 
-                    Sys.time(), paste("Mobile check-in to:", input$mobile_fridge_loc))
+       VALUES (?, ?, ?, datetime('now'), ?)",
+      params = list(
+        proc_id,
+        plant_id,
+        "Batch_Scan",
+        "Batch scanned"
+      )
     )
     
     poolReturn(con)
-    
-    # Show success
-    showNotification(
-      paste("✓ Mobile check-in successful!", input$mobile_plant_id, "→", input$mobile_fridge_loc),
-      type = "message",
-      duration = 3
-    )
-    
-    # Clear and log
-    output$mobile_result_message <- renderUI({
-      bs4Card(
-        title = "Check-In Successful",
-        closable = FALSE,
-        status = "success",
-        p(strong("Plant ID:"), input$mobile_plant_id),
-        p(strong("Location:"), input$mobile_fridge_loc),
-        p(strong("Time:"), Sys.time())
-      )
-    })
+  }
+  
+  # Batch scanning outputs
+  output$batch_header_display <- renderText({
+    "🔖 BATCH SCANNER"
   })
   
-  # Auto-submit when QR code is scanned (detects valid plant ID format)
-  observe({
-    input$mobile_plant_id
-    
-    # Check if input has valid format: ST0001-P0001
-    plant_id <- input$mobile_plant_id
-    if (nchar(plant_id) > 0 && grepl("^ST\\d{4}-P\\d{4}$", plant_id)) {
-      # Valid plant ID detected - auto-trigger check-in after brief delay
-      shinyjs::runjs("
-        setTimeout(function() {
-          // Auto-submit the check-in button if there's a valid plant ID
-          if ($('#mobile_plant_id').val().match(/^ST\\d{4}-P\\d{4}$/)) {
-            $('#btn_mobile_checkin').click();
-            // Auto-focus back to plant ID field for next scan
-            setTimeout(function() { $('#mobile_plant_id').val('').focus(); }, 500);
-          }
-        }, 100);
-      ")
+  output$last_scanned_display <- renderText({
+    if (nchar(batch_state$last_scanned) > 0) {
+      batch_state$last_scanned
+    } else {
+      "waiting..."
     }
   })
   
-  # Mobile check-ins log
-  output$mobile_checkins_log <- DT::renderDataTable({
-    input$btn_mobile_checkin
+  output$batch_list_ui <- renderUI({
+    if (length(batch_state$batch_samples) > 0) {
+      lapply(seq_along(batch_state$batch_samples), function(i) {
+        sample_id <- batch_state$batch_samples[i]
+        time_str <- format(Sys.time(), "%H:%M:%S")
+        
+        div(
+          class = "batch-item success",
+          div(
+            div(class = "batch-item-id", sample_id),
+            div(class = "batch-item-time", time_str)
+          ),
+          div(class = "batch-item-checkmark", "✓")
+        )
+      })
+    } else {
+      div(
+        style = "text-align: center; color: #999; margin-top: 40px; font-size: 18px;",
+        "Ready to scan samples..."
+      )
+    }
+  })
+  
+  output$batch_count <- renderText({
+    length(batch_state$batch_samples)
+  })
+  
+  output$invalid_warning_ui <- renderUI({
+    if (batch_state$show_invalid) {
+      div(
+        class = "invalid-warning",
+        h2("❌ INVALID"),
+        p(batch_state$invalid_code),
+        p(style = "font-size: 16px; margin-top: 20px;", "Code not recognized")
+      )
+    }
+  })
+  
+  output$success_flash_ui <- renderUI({
+    if (batch_state$show_success) {
+      div(
+        class = "success-flash",
+        h2("✓ SUCCESS"),
+        p(batch_state$show_success_code)
+      )
+    }
+  })
+  
+  # Keep scanner input focused when on batch scanning tab
+  observe({
+    shinyjs::runjs("
+      var elem = document.getElementById('master_scanner_input');
+      if (elem && elem.offsetParent !== null) {
+        elem.focus();
+      }
+    ")
+  })
+  
+  # ============================================================
+  # CREATE SITE TAB
+  # ============================================================
+  
+  observeEvent(input$btn_create_site, {
+    tryCatch({
+      # Validate site ID format
+      if (is.null(input$create_site_id) || input$create_site_id == "") {
+        showNotification("❌ Please enter a Site ID", type = "error", duration = 5)
+        return()
+      }
+      
+      # Validate site ID format (ST + 4 digits)
+      if (!grepl("^ST\\d{4}$", input$create_site_id)) {
+        showNotification("❌ Site ID must be in format: ST0001, ST0002, etc.", type = "error", duration = 5)
+        return()
+      }
+      
+      site_id <- input$create_site_id
+      description <- input$create_site_description
+      
+      if (is.null(description)) description <- ""
+      
+      # Check for duplicates
+      con <- poolCheckout(pool)
+      existing <- dbGetQuery(con, 
+        paste0("SELECT * FROM Sites WHERE site_id = '", site_id, "'"))
+      
+      if (nrow(existing) > 0) {
+        poolReturn(con)
+        showNotification(
+          paste("❌ Site", site_id, "already exists"),
+          type = "error",
+          duration = 5
+        )
+        return()
+      }
+      
+      # Insert new site without coordinates (Step 1 - before field trip)
+      dbExecute(con,
+        "INSERT INTO Sites (site_id, site_name, site_lat, site_long) 
+         VALUES (?, ?, NULL, NULL)",
+        params = list(site_id, description)
+      )
+      
+      poolReturn(con)
+      
+      # Show success
+      output$create_site_status <- renderUI({
+        div(
+          style = "padding: 20px; background: #e8f5e9; border-radius: 8px; border-left: 4px solid #4caf50;",
+          h4("✓ Site Created Successfully"),
+          p(strong("Site ID:"), site_id),
+          p(strong("Description:"), description),
+          p(style = "margin-top: 15px; color: #666; font-size: 13px;",
+            "Next step: After collecting GPS data, go to Step 2 to add coordinates."
+          )
+        )
+      })
+      
+      # Clear inputs - use reset() method
+      shinyjs::runjs("document.getElementById('create_site_id').value = '';")
+      shinyjs::runjs("document.getElementById('create_site_description').value = '';")
+      
+      showNotification(paste("✓ Site", site_id, "created successfully!"), type = "message", duration = 5)
+      
+    }, error = function(e) {
+      showNotification(paste("❌ Error:", e$message), type = "error", duration = 5)
+    })
+  })
+  
+  # ADD COORDINATES TAB
+  # ============================================================
+  
+  observeEvent(input$btn_add_coord, {
+    tryCatch({
+      # Validate site selection
+      if (is.null(input$add_coord_site_id) || input$add_coord_site_id == "") {
+        showNotification("❌ Please select a site", type = "error", duration = 5)
+        return()
+      }
+      
+      # Validate latitude
+      if (is.null(input$add_coord_latitude) || input$add_coord_latitude == "") {
+        showNotification("❌ Please enter latitude", type = "error", duration = 5)
+        return()
+      }
+      
+      # Validate longitude
+      if (is.null(input$add_coord_longitude) || input$add_coord_longitude == "") {
+        showNotification("❌ Please enter longitude", type = "error", duration = 5)
+        return()
+      }
+      
+      # Parse and validate coordinates
+      lat <- tryCatch(as.numeric(input$add_coord_latitude), error = function(e) NA)
+      lon <- tryCatch(as.numeric(input$add_coord_longitude), error = function(e) NA)
+      
+      if (is.na(lat) || is.na(lon)) {
+        showNotification("❌ Latitude and Longitude must be valid numbers", type = "error", duration = 5)
+        return()
+      }
+      
+      if (lat < -90 || lat > 90) {
+        showNotification("❌ Latitude must be between -90 and 90", type = "error", duration = 5)
+        return()
+      }
+      
+      if (lon < -180 || lon > 180) {
+        showNotification("❌ Longitude must be between -180 and 180", type = "error", duration = 5)
+        return()
+      }
+      
+      site_id <- input$add_coord_site_id
+      
+      # Update site with coordinates
+      con <- poolCheckout(pool)
+      dbExecute(con,
+        "UPDATE Sites SET site_lat = ?, site_long = ? WHERE site_id = ?",
+        params = list(lat, lon, site_id)
+      )
+      poolReturn(con)
+      
+      # Show success
+      output$add_coord_status <- renderUI({
+        div(
+          style = "padding: 20px; background: #fff3cd; border-radius: 8px; border-left: 4px solid #ffc107;",
+          h4("✓ Coordinates Added"),
+          p(strong("Site ID:"), site_id),
+          p(strong("Latitude:"), lat),
+          p(strong("Longitude:"), lon),
+          p(style = "margin-top: 15px; color: #666; font-size: 13px;",
+            "Site is now ready for label generation."
+          )
+        )
+      })
+      
+      # Clear inputs
+      shinyjs::runjs("document.getElementById('add_coord_latitude').value = '';")
+      shinyjs::runjs("document.getElementById('add_coord_longitude').value = '';")
+      
+      showNotification(paste("✓ Coordinates added for", site_id), type = "message", duration = 5)
+      
+    }, error = function(e) {
+      showNotification(paste("❌ Error:", e$message), type = "error", duration = 5)
+    })
+  })
+  
+  # Render existing sites table with proper formatting
+  output$existing_sites_table <- DT::renderDataTable({
+    # Reactive trigger
+    input$btn_create_site
+    input$btn_add_coord
     
     con <- poolCheckout(pool)
-    mobile_logs <- dbGetQuery(con,
-      "SELECT p.plant_id, p.site_id, p.species, p.fridge_loc, pr.date
-       FROM Plants p
-       LEFT JOIN Processing pr ON p.plant_id = pr.plant_id
-       WHERE pr.type = 'Mobile_Checkin'
-       ORDER BY pr.date DESC
-       LIMIT 30"
-    )
+    sites_data <- dbGetQuery(con, "SELECT site_id as 'Site ID', site_name as 'Site Name', site_lat as 'Latitude', site_long as 'Longitude' FROM Sites ORDER BY site_id")
     poolReturn(con)
     
-    if (nrow(mobile_logs) == 0) {
-      return(data.frame(Message = "No mobile check-ins yet"))
+    # Add icon for coordinate status
+    if (nrow(sites_data) > 0) {
+      sites_data$'Coordinates' <- sapply(1:nrow(sites_data), function(i) {
+        if (is.na(sites_data[i, 'Latitude']) || sites_data[i, 'Latitude'] == '') {
+          "⚠️ Missing"
+        } else {
+          "✓ Added"
+        }
+      })
     }
     
-    DT::datatable(mobile_logs, options = list(pageLength = 10))
+    datatable(sites_data,
+      options = list(
+        pageLength = 10,
+        searching = TRUE,
+        ordering = TRUE,
+        paging = TRUE,
+        scrollY = "400px",
+        dom = 'lfrtip'
+      ),
+      rownames = FALSE,
+      selection = 'none'
+    )
+  }, server = TRUE)
+  
+  # ============================================================
+  # LABEL GENERATION TAB
+  # ============================================================
+  
+  # Generate plant labels button
+  # ============ STAGE 1: PRE-SAMPLING LABELS ============
+  
+  observeEvent(input$btn_presamp_plant, {
+    generate_presamp_labels("P", "plant")
   })
   
-  # ===== LABEL GENERATION SERVER =====
+  observeEvent(input$btn_presamp_soil, {
+    generate_presamp_labels("S", "soil")
+  })
   
-  # Generate batch labels with QR codes
-  observeEvent(input$btn_generate_labels, {
-    if (input$label_site_select == "") {
-      showNotification("Please select a site", type = "error")
+  generate_presamp_labels <- function(sample_type, sample_type_name) {
+    # Validation
+    site_id <- if (sample_type == "P") input$presamp_site_plant else input$presamp_site_soil
+    quantity <- if (sample_type == "P") input$presamp_plant_count else input$presamp_soil_count
+    label_date <- if (sample_type == "P") input$presamp_plant_date else input$presamp_soil_date
+    
+    if (site_id == "") {
+      showNotification("❌ Please select a site", type = "error")
       return()
     }
     
-    site_id <- input$label_site_select
-    start_idx <- input$label_start_index
-    end_idx <- input$label_end_index
-    
-    if (start_idx > end_idx) {
-      showNotification("Start index must be less than end index", type = "error")
+    if (quantity < 1) {
+      showNotification(paste("❌ Please enter at least 1 sample"), type = "error")
       return()
     }
     
-    output$label_generation_status <- renderUI({
-      bs4Card(
-        title = "Generating...",
-        closable = FALSE,
-        status = "info",
-        p("Please wait, generating labels...")
+    # Show progress
+    output$presamp_status <- renderUI({
+      div(
+        style = "padding: 15px; background: #e3f2fd; border-radius: 6px; margin-top: 15px;",
+        p("🔄 Generating labels...")
       )
     })
     
-    # Create labels directory
-    labels_dir <- "data/labels"
-    if (!dir.exists(labels_dir)) dir.create(labels_dir, recursive = TRUE)
-    
     tryCatch({
-      # Generate individual PNG files for each label (horizontal format for label maker tape)
-      # Layout: Large ID text on left, QR code on right, no overlapping
-      for (i in start_idx:end_idx) {
-        plant_id <- sprintf("%s-P%04d", site_id, i)
-        label_file <- file.path(labels_dir, paste0(plant_id, ".png"))
+      labels_dir <- "data/labels"
+      if (!dir.exists(labels_dir)) dir.create(labels_dir, recursive = TRUE)
+      
+      con <- poolCheckout(pool)
+      
+      generated_labels <- character()
+      
+      for (i in 1:quantity) {
+        sample_num <- sprintf("%04d", i)
+        full_id <- sprintf("%s-%s%s", site_id, sample_type, sample_num)
         
-        # Create horizontal label (1800x600 pixels at 150 DPI)
-        library(grid)
+        # Check duplicate
+        dup_check <- dbGetQuery(con, 
+          paste0("SELECT label_id FROM Labels WHERE label_id = '", full_id, "'"))
         
-        # Set seed based on plant_id for reproducible QR codes
-        set.seed(as.integer(charToRaw(plant_id)) %% 2147483647)
+        if (nrow(dup_check) > 0) {
+          showNotification(paste("⚠️", full_id, "already exists - skipping"), type = "warning")
+          next
+        }
         
-        # First, generate QR code to temporary file
-        qr_obj <- qr_code(plant_id)
+        # Generate QR code
+        label_file <- file.path(labels_dir, paste0(full_id, ".png"))
+        set.seed(as.integer(charToRaw(full_id)) %% 2147483647)
+        qr_obj <- qr_code(full_id)
         temp_qr_file <- tempfile(fileext = ".png")
         png(temp_qr_file, width = 400, height = 400, bg = "white")
         plot(qr_obj)
         dev.off()
         qr_img <- png::readPNG(temp_qr_file)
         
-        # Now create label with text and QR
+        # Create label with selected date
         png(label_file, width = 1800, height = 600, res = 150, bg = "white")
-        
         grid.newpage()
+        grid.text(full_id, x = 0.27, y = 0.75, 
+          gp = gpar(fontsize = 44, fontface = "bold", family = "monospace"), just = "centre")
+        grid.text(as.character(label_date), x = 0.27, y = 0.25,
+          gp = gpar(fontsize = 40, fontface = "bold", family = "monospace"), just = "centre")
         
-        # LEFT COLUMN: Plant ID (top) and Date (bottom) - direct positioning
-        # Plant ID - positioned inside QR bounds, below upper edge
-        grid.text(plant_id, 
-                  x = 0.27, y = 0.75, 
-                  gp = gpar(fontsize = 48, fontface = "bold", family = "monospace"),
-                  just = "centre")
-        
-        # Date - positioned inside QR bounds, above lower edge
-        grid.text(as.character(Sys.Date()), 
-                  x = 0.27, y = 0.25, 
-                  gp = gpar(fontsize = 48, fontface = "bold", family = "monospace"),
-                  just = "centre")
-        
-        # RIGHT: QR Code area - square viewport (accounting for 1800x600 page aspect ratio)
-        # Page is 3:1 aspect ratio, so for a square: width_npc = height_npc * (600/1800)
-        qr_height_npc <- 0.95
-        qr_width_npc <- qr_height_npc * (600 / 1800)  # 0.3167
-        qr_vp <- viewport(x = 0.75, y = 0.5, width = qr_width_npc, height = qr_height_npc)
+        # QR code viewport: fixed square aspect ratio (576x576 px on 1800x600 label)
+        qr_vp <- viewport(x = 0.75, y = 0.5, width = 0.32, height = 0.96)
         pushViewport(qr_vp)
-        # Plot QR as raster image as a perfect square
-        grid.raster(qr_img, width = 0.85, height = 0.85, x = 0.5, y = 0.5)
-        
+        grid.raster(qr_img, width = 0.9, height = 0.9, x = 0.5, y = 0.5)
         popViewport()
         dev.off()
-        
         unlink(temp_qr_file)
+        
+        generated_labels <- c(generated_labels, full_id)
+        
+        dbExecute(con, "INSERT INTO Labels (label_id, stage, site_id, sample_type, created_date)
+          VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+          params = list(full_id, 1, site_id, sample_type))
       }
       
-      # Create PDF version if requested
-      if (input$label_format == "pdf") {
-        pdf_file <- file.path(labels_dir, paste0(site_id, "_labels.pdf"))
-        num_labels <- (end_idx - start_idx + 1)
-        
-        # Create PDF with 4 labels per page
-        pdf(pdf_file, width = 8.5, height = 11, onefile = TRUE)
-        
-        label_count <- 0
-        for (i in start_idx:end_idx) {
-          plant_id <- sprintf("%s-P%04d", site_id, i)
-          
-          if (label_count %% 4 == 0 && label_count > 0) {
-            # New page after 4 labels
-            plot.new()
-          }
-          
-          label_count <- label_count + 1
-        }
-        
-        dev.off()
-      }
+      poolReturn(con)
       
-      # Prepare status message
-      format_msg <- switch(input$label_format,
-        "png" = "PNG files (individual labels)",
-        "pdf" = "PDF file"
-      )
-      
-      output$label_generation_status <- renderUI({
-        bs4Card(
-          title = "✓ Labels Generated",
-          closable = FALSE,
-          status = "success",
-          p(strong("Generated:"), (end_idx - start_idx + 1), "labels"),
-          p(strong("Format:"), format_msg),
-          p(strong("Site:"), site_id),
-          p(strong("ID Range:"), sprintf("P%04d to P%04d", start_idx, end_idx)),
-          p(strong("Location:"), file.path(labels_dir)),
-          br(),
-          p("Files ready for printing. Find them in:", code(labels_dir))
+      icon_emoji <- if (sample_type == "P") "🌱" else "🌍"
+      output$presamp_status <- renderUI({
+        div(
+          style = "padding: 15px; background: #e8f5e9; border-radius: 6px; margin-top: 15px; border-left: 4px solid #4caf50;",
+          h5(paste("✓", icon_emoji, length(generated_labels), "pre-sampling labels generated")),
+          p(strong("IDs:"), paste(generated_labels[1:min(3, length(generated_labels))], collapse = ", "),
+            if (length(generated_labels) > 3) paste0(", ..."))
         )
       })
       
-      showNotification(
-        paste("Generated", (end_idx - start_idx + 1), "labels for", site_id),
-        type = "message",
-        duration = 5
-      )
+      showNotification(paste("✓", length(generated_labels), "labels generated!"), type = "message")
       
     }, error = function(e) {
-      output$label_generation_status <- renderUI({
-        bs4Card(
-          title = "Error",
-          closable = FALSE,
-          status = "danger",
-          p("Error generating labels:"),
-          p(code(e$message))
+      tryCatch(poolReturn(con), error = function(e2) {})
+      output$presamp_status <- renderUI({
+        div(
+          style = "padding: 15px; background: #ffebee; border-radius: 6px; margin-top: 15px;",
+          p("❌ Error:", e$message)
         )
       })
       showNotification(paste("Error:", e$message), type = "error")
     })
+  }
+  
+  # ============ STAGE 2: PARTS PROCESSING LABELS ============
+  
+  observeEvent(input$btn_parts_generate, {
+    generate_parts_labels()
   })
   
-  # ===== EQUIPMENT LABELS SERVER =====
-  
-  # Populate equipment choices dynamically
-  observe({
-    con <- poolCheckout(pool)
-    equipment_data <- dbGetQuery(con, "SELECT equipment_id, character_name, category FROM Equipment ORDER BY equipment_id")
-    poolReturn(con)
+  generate_parts_labels <- function() {
+    sample_id <- input$parts_sample_id
+    label_date <- input$parts_date
     
-    if (nrow(equipment_data) > 0) {
-      choices <- setNames(equipment_data$equipment_id, 
-                          paste0(equipment_data$equipment_id, " | ", equipment_data$character_name))
-      updateCheckboxGroupInput(session, "selected_equipment", choices = choices)
+    if (sample_id == "") {
+      showNotification("❌ Please enter a sample ID (e.g., ST0001-P0001)", type = "error")
+      return()
     }
-  })
-  
-  # Equipment inventory table
-  output$equipment_inventory_table <- DT::renderDataTable({
-    con <- poolCheckout(pool)
-    equipment <- dbGetQuery(con,
-      "SELECT equipment_id, character_name, category, description
-       FROM Equipment
-       ORDER BY equipment_id"
-    )
-    poolReturn(con)
     
-    # Create styled HTML with colored badges
-    badge_html <- sapply(1:nrow(equipment), function(i) {
-      eq_id <- equipment$equipment_id[i]
-      char_name <- equipment$character_name[i]
-      category <- equipment$category[i]
-      
-      # Determine color and initial based on category
-      if (grepl("Ultra-Low", category)) {
-        badge_color <- "#9C27B0"  # Purple
-      } else if (grepl("Standard Freezers", category)) {
-        badge_color <- "#2196F3"  # Blue
-      } else if (grepl("Fridges", category)) {
-        badge_color <- "#4CAF50"  # Green
-      } else if (grepl("growth chamber", category)) {
-        badge_color <- "#FF9800"  # Orange
-      } else {
-        badge_color <- "#757575"  # Gray
-      }
-      
-      initial <- substr(char_name, 1, 1)
-      
-      HTML(paste0(
-        '<div style="display: flex; align-items: center; gap: 10px;">',
-        '<div style="width: 40px; height: 40px; border-radius: 50%; background-color: ', badge_color, 
-        '; color: white; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 18px;">',
-        initial,
-        '</div>',
-        '<div>',
-        '<strong>', eq_id, '</strong><br/>',
-        '<small>', char_name, '</small>',
-        '</div>',
-        '</div>'
-      ))
+    parts <- list(
+      SH = input$parts_sh_count,
+      RT = input$parts_rt_count,
+      ND = input$parts_nd_count,
+      LF = input$parts_lf_count
+    )
+    
+    total_parts <- sum(unlist(parts))
+    if (total_parts < 1) {
+      showNotification("❌ Please specify at least 1 part", type = "error")
+      return()
+    }
+    
+    output$parts_status <- renderUI({
+      div(
+        style = "padding: 15px; background: #e3f2fd; border-radius: 6px; margin-top: 15px;",
+        p("🔄 Generating part labels...")
+      )
     })
     
-    # Create data frame with styled display
-    display_df <- data.frame(
-      Badge = badge_html,
-      Category = equipment$category,
-      Description = equipment$description,
-      stringsAsFactors = FALSE
+    tryCatch({
+      labels_dir <- "data/labels"
+      if (!dir.exists(labels_dir)) dir.create(labels_dir, recursive = TRUE)
+      
+      con <- poolCheckout(pool)
+      generated_labels <- character()
+      
+      for (part_code in names(parts)) {
+        count <- parts[[part_code]]
+        if (count < 1) next
+        
+        for (i in 1:count) {
+          part_num <- sprintf("%03d", i)
+          full_id <- sprintf("%s-%s%s", sample_id, part_code, part_num)
+          
+          dup_check <- dbGetQuery(con, 
+            paste0("SELECT label_id FROM Labels WHERE label_id = '", full_id, "'"))
+          
+          if (nrow(dup_check) > 0) {
+            showNotification(paste("⚠️", full_id, "already exists - skipping"), type = "warning")
+            next
+          }
+          
+          label_file <- file.path(labels_dir, paste0(full_id, ".png"))
+          set.seed(as.integer(charToRaw(full_id)) %% 2147483647)
+          qr_obj <- qr_code(full_id)
+          temp_qr_file <- tempfile(fileext = ".png")
+          png(temp_qr_file, width = 400, height = 400, bg = "white")
+          plot(qr_obj)
+          dev.off()
+          qr_img <- png::readPNG(temp_qr_file)
+          
+          png(label_file, width = 1800, height = 600, res = 150, bg = "white")
+          grid.newpage()
+          grid.text(full_id, x = 0.27, y = 0.75,
+            gp = gpar(fontsize = 44, fontface = "bold", family = "monospace"), just = "centre")
+          grid.text(as.character(label_date), x = 0.27, y = 0.25,
+            gp = gpar(fontsize = 40, fontface = "bold", family = "monospace"), just = "centre")
+          
+          qr_vp <- viewport(x = 0.75, y = 0.5, width = 0.32, height = 0.96)
+          pushViewport(qr_vp)
+          grid.raster(qr_img, width = 0.9, height = 0.9, x = 0.5, y = 0.5)
+          popViewport()
+          dev.off()
+          unlink(temp_qr_file)
+          
+          generated_labels <- c(generated_labels, full_id)
+          
+          dbExecute(con, "INSERT INTO Labels (label_id, stage, sample_id, part_code, created_date)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            params = list(full_id, 2, sample_id, part_code))
+        }
+      }
+      
+      poolReturn(con)
+      
+      output$parts_status <- renderUI({
+        div(
+          style = "padding: 15px; background: #e8f5e9; border-radius: 6px; margin-top: 15px; border-left: 4px solid #4caf50;",
+          h5(paste("✓", length(generated_labels), "part labels generated")),
+          p(strong("IDs:"), paste(generated_labels[1:min(3, length(generated_labels))], collapse = ", "),
+            if (length(generated_labels) > 3) paste0(", ..."))
+        )
+      })
+      
+      showNotification(paste("✓", length(generated_labels), "part labels generated!"), type = "message")
+      
+    }, error = function(e) {
+      tryCatch(poolReturn(con), error = function(e2) {})
+      output$parts_status <- renderUI({
+        div(
+          style = "padding: 15px; background: #ffebee; border-radius: 6px; margin-top: 15px;",
+          p("❌ Error:", e$message)
+        )
+      })
+      showNotification(paste("Error:", e$message), type = "error")
+    })
+  }
+  
+  # ============ STAGE 3: SAMPLE USE LABELS ============
+  
+  observeEvent(input$btn_use_generate, {
+    generate_use_labels()
+  })
+  
+  generate_use_labels <- function() {
+    part_id <- input$use_part_id
+    label_date <- input$use_date
+    
+    if (part_id == "") {
+      showNotification("❌ Please enter a part ID (e.g., ST0001-P0001-SH001)", type = "error")
+      return()
+    }
+    
+    uses <- list(
+      GW = input$use_gw_count,
+      DE = input$use_de_count,
+      RE = input$use_re_count,
+      IS = input$use_other_count
     )
     
-    DT::datatable(
-      display_df,
-      escape = FALSE,  # Allow HTML rendering
+    total_uses <- sum(unlist(uses))
+    if (total_uses < 1) {
+      showNotification("❌ Please specify at least 1 use", type = "error")
+      return()
+    }
+    
+    output$use_status <- renderUI({
+      div(
+        style = "padding: 15px; background: #e3f2fd; border-radius: 6px; margin-top: 15px;",
+        p("🔄 Generating use labels...")
+      )
+    })
+    
+    tryCatch({
+      labels_dir <- "data/labels"
+      if (!dir.exists(labels_dir)) dir.create(labels_dir, recursive = TRUE)
+      
+      con <- poolCheckout(pool)
+      generated_labels <- character()
+      
+      for (use_code in names(uses)) {
+        count <- uses[[use_code]]
+        if (count < 1) next
+        
+        for (i in 1:count) {
+          use_num <- sprintf("%02d", i)
+          full_id <- sprintf("%s-%s%s", part_id, use_code, use_num)
+          
+          dup_check <- dbGetQuery(con,
+            paste0("SELECT label_id FROM Labels WHERE label_id = '", full_id, "'"))
+          
+          if (nrow(dup_check) > 0) {
+            showNotification(paste("⚠️", full_id, "already exists - skipping"), type = "warning")
+            next
+          }
+          
+          label_file <- file.path(labels_dir, paste0(full_id, ".png"))
+          set.seed(as.integer(charToRaw(full_id)) %% 2147483647)
+          qr_obj <- qr_code(full_id)
+          temp_qr_file <- tempfile(fileext = ".png")
+          png(temp_qr_file, width = 400, height = 400, bg = "white")
+          plot(qr_obj)
+          dev.off()
+          qr_img <- png::readPNG(temp_qr_file)
+          
+          png(label_file, width = 1800, height = 600, res = 150, bg = "white")
+          grid.newpage()
+          grid.text(full_id, x = 0.27, y = 0.75,
+            gp = gpar(fontsize = 44, fontface = "bold", family = "monospace"), just = "centre")
+          grid.text(as.character(label_date), x = 0.27, y = 0.25,
+            gp = gpar(fontsize = 40, fontface = "bold", family = "monospace"), just = "centre")
+          
+          qr_vp <- viewport(x = 0.75, y = 0.5, width = 0.32, height = 0.96)
+          pushViewport(qr_vp)
+          grid.raster(qr_img, width = 0.9, height = 0.9, x = 0.5, y = 0.5)
+          popViewport()
+          dev.off()
+          unlink(temp_qr_file)
+          
+          generated_labels <- c(generated_labels, full_id)
+          
+          dbExecute(con, "INSERT INTO Labels (label_id, stage, part_id, use_code, created_date)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            params = list(full_id, 3, part_id, use_code))
+        }
+      }
+      
+      poolReturn(con)
+      
+      output$use_status <- renderUI({
+        div(
+          style = "padding: 15px; background: #e8f5e9; border-radius: 6px; margin-top: 15px; border-left: 4px solid #4caf50;",
+          h5(paste("✓", length(generated_labels), "use labels generated")),
+          p(strong("IDs:"), paste(generated_labels[1:min(3, length(generated_labels))], collapse = ", "),
+            if (length(generated_labels) > 3) paste0(", ..."))
+        )
+      })
+      
+      showNotification(paste("✓", length(generated_labels), "use labels generated!"), type = "message")
+      
+    }, error = function(e) {
+      tryCatch(poolReturn(con), error = function(e2) {})
+      output$use_status <- renderUI({
+        div(
+          style = "padding: 15px; background: #ffebee; border-radius: 6px; margin-top: 15px;",
+          p("❌ Error:", e$message)
+        )
+      })
+      showNotification(paste("Error:", e$message), type = "error")
+    })
+  }
+  
+  # ============================================================
+  # INVENTORY TAB
+  # ============================================================
+  
+  # Display total sample count
+  output$inventory_total_count <- renderText({
+    # Reactive triggers
+    input$btn_presamp_plant
+    input$btn_presamp_soil
+    input$btn_parts_generate
+    input$btn_use_generate
+    
+    con <- poolCheckout(pool)
+    total_samples <- dbGetQuery(con, 
+      "SELECT COUNT(DISTINCT site_id) as count FROM Labels WHERE stage = 1"
+    )$count
+    poolReturn(con)
+    total_samples
+  })
+  
+  # Render inventory table
+  output$inventory_table <- DT::renderDataTable({
+    # Reactive triggers
+    input$btn_presamp_plant
+    input$btn_presamp_soil
+    input$btn_parts_generate
+    input$btn_use_generate
+    
+    search_term <- input$inventory_search
+    status_filter <- input$inventory_status_filter
+    
+    con <- poolCheckout(pool)
+    
+    # Get all unique labels with their hierarchy - NO aggregation
+    query <- "
+      SELECT DISTINCT
+        CASE 
+          WHEN stage = 1 THEN label_id
+          WHEN stage = 2 THEN part_id
+          WHEN stage = 3 THEN label_id
+        END as sample_id,
+        stage,
+        site_id,
+        sample_type,
+        COALESCE(sample_status, 'label_created') as sample_status,
+        COALESCE(storage_location, '') as storage_location
+      FROM Labels
+      ORDER BY site_id, stage, sample_id
+    "
+    
+    inventory_data <- dbGetQuery(con, query)
+    poolReturn(con)
+    
+    # Filter by search term if provided
+    if (!is.na(search_term) && search_term != "") {
+      inventory_data <- inventory_data[grepl(search_term, inventory_data$sample_id, ignore.case = TRUE) |
+                                      grepl(search_term, inventory_data$site_id, ignore.case = TRUE), ]
+    }
+    
+    # Add status column based on stage
+    inventory_data$Status <- sapply(inventory_data$stage, function(stage) {
+      switch(stage,
+        "1" = "Created",
+        "2" = "Processing",
+        "3" = "Complete",
+        "Unknown"
+      )
+    })
+    
+    # Filter by status if provided
+    if (!is.na(status_filter) && status_filter != "") {
+      inventory_data$Status_Value <- sapply(inventory_data$Status, function(s) tolower(substring(s, 1, 1)))
+      status_map <- list("c" = "created", "s" = "stored", "p" = "processing", "c" = "complete")
+      inventory_data <- inventory_data[tolower(inventory_data$Status) == status_filter, ]
+    }
+    
+    # Select columns to display - remove Count column
+    display_data <- data.frame(
+      "Site" = inventory_data$site_id,
+      "Sample/Part/Use" = inventory_data$sample_id,
+      "Type" = inventory_data$sample_type,
+      "Stage" = sapply(inventory_data$stage, function(s) {
+        switch(s, "1" = "Pre-Sampling", "2" = "Parts", "3" = "Use", s)
+      }),
+      "Status" = inventory_data$Status,
+      "Location" = sapply(inventory_data$storage_location, function(x) if(is.na(x) || x == "") "-" else x)
+    )
+    
+    DT::datatable(display_data,
+      rownames = FALSE,
       options = list(
-        pageLength = 10,
+        pageLength = 20,
+        lengthMenu = c(10, 20, 50),
+        searching = FALSE,
         columnDefs = list(
-          list(width = "200px", targets = 0)
+          list(targets = 0, render = JS("function(data) { return '<strong>' + data + '</strong>'; }")),
+          list(targets = 4, render = JS("function(data) {
+            if(data === 'Complete') return '<span style=\"color: #4caf50; font-weight: bold;\">✓ ' + data + '</span>';
+            if(data === 'Processing') return '<span style=\"color: #ff9800; font-weight: bold;\">⚙ ' + data + '</span>';
+            if(data === 'Created') return '<span style=\"color: #2196f3;\">' + data + '</span>';
+            return data;
+          }"))
         )
       )
     )
-  })
+  }, server = TRUE)
   
-  # Display QR code labels for all equipment in grid format
-  output$equipment_qr_labels_display <- renderUI({
-    con <- poolCheckout(pool)
-    equipment <- dbGetQuery(con,
-      "SELECT * FROM Equipment ORDER BY equipment_id"
-    )
-    poolReturn(con)
-    
-    if (nrow(equipment) == 0) {
-      return(p("No equipment available", style = "color: gray;"))
-    }
-    
-    # Generate QR codes and create grid display
-    label_boxes <- lapply(1:nrow(equipment), function(idx) {
-      equipment_id <- equipment$equipment_id[idx]
-      character_name <- equipment$character_name[idx]
-      category <- equipment$category[idx]
-      
-      # Determine border color based on category
-      if (grepl("Ultra-Low", category)) {
-        border_color <- "#9C27B0"  # Purple
-        bg_light <- "#F3E5F5"
-      } else if (grepl("Standard Freezers", category)) {
-        border_color <- "#2196F3"  # Blue
-        bg_light <- "#E3F2FD"
-      } else if (grepl("Fridges", category)) {
-        border_color <- "#4CAF50"  # Green
-        bg_light <- "#E8F5E9"
-      } else if (grepl("growth chamber", category)) {
-        border_color <- "#FF9800"  # Orange
-        bg_light <- "#FFF3E0"
-      } else {
-        border_color <- "#757575"  # Gray
-        bg_light <- "#F5F5F5"
-      }
-      
-      # Generate QR code 
-      set.seed(as.integer(charToRaw(equipment_id)) %% 2147483647)
-      qr_obj <- qr_code(equipment_id)
-      
-      # Save QR as temporary PNG and convert to base64 for embedding
-      temp_qr_file <- tempfile(fileext = ".png")
-      png(temp_qr_file, width = 200, height = 200, bg = "white")
-      plot(qr_obj)
-      dev.off()
-      
-      # Read and encode image
-      qr_img_base64 <- base64enc::dataURI(file = temp_qr_file, mime = "image/png")
-      unlink(temp_qr_file)
-      
-      # Create card as plain HTML div
-      div(
-        style = paste0("border: 3px solid ", border_color, "; border-radius: 8px; padding: 15px; ",
-                      "background-color: ", bg_light, "; margin-bottom: 15px; text-align: center; ",
-                      "flex: 0 0 calc(50% - 10px); min-width: 300px;"),
-        h4(equipment_id, style = paste0("color: ", border_color, "; margin: 0 0 5px 0;")),
-        p(strong(character_name), style = "margin: 0 0 10px 0; font-size: 14px;"),
-        p(style = "font-size: 12px; color: #666; margin: 0 0 10px 0;", category),
-        img(src = qr_img_base64, style = "width: 150px; height: 150px; border: 1px solid #ccc;"),
-        p(style = "font-size: 11px; color: #999; margin-top: 8px;", "Scan QR to identify equipment")
-      )
-    })
-    
-    # Wrap in a flex container for proper grid layout
-    do.call(tagList, c(
-      list(div(style = "display: flex; flex-wrap: wrap; gap: 20px; margin-top: 15px;",
-        do.call(tagList, label_boxes)
-      )),
-      list(br())
-    ))
-  })
-  
-  # Pool is managed globally and shared across sessions
-  # Do not close it in onStop to avoid "closed pool" errors
 }
 
-# Run the application
+# ============================================================
+# HELPER FUNCTION -Generate Processing IDs
+# ============================================================
+
+generate_proc_id <- function() {
+  con <- poolCheckout(pool)
+  result <- dbGetQuery(con, "SELECT COUNT(*) as count FROM Processing")
+  poolReturn(con)
+  count <- result$count[1] + 1
+  sprintf("PROC%06d", count)
+}
+
+# ============================================================
+# RUN APPLICATION
+# ============================================================
+
 shinyApp(ui = ui, server = server)
