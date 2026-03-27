@@ -1,7 +1,7 @@
 # mod_sites.R
 sitesUI <- function(id) {
   ns <- NS(id)
-  div(
+  div(class = "site-card",
     textInput(ns("site_id"), "Site ID", placeholder = "e.g. ST0001"),
     helpText("Format: ST followed by 4 digits (ST0001 – ST9999)"),
     textInput(ns("site_name"), "Site Name", placeholder = "e.g. North meadow plot"),

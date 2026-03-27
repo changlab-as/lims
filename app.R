@@ -5,11 +5,14 @@
 # ============================================================
 # USER INTERFACE
 # ============================================================
+options(shiny.autoreload = TRUE)
 
 ui <- page_navbar(
-  title = "🧪 Chang Lab LIMS",
+  title = "🧪 Chang Lab LIMSsss",
   theme = bslib::bs_theme(bootswatch = "flatly"),
   
+  # Navigation panels
+  nav_panel("Create Sites", sitesUI("sites")),
   # Navigation panels
   nav_panel("Create Sites", sitesUI("sites")),
   
