@@ -1,8 +1,10 @@
 default:
-  golem_name: lims
+  golem_name: LIMS
   golem_version: 0.0.0.9000
   app_prod: no
+  db_path: "/Users/cychang/Desktop/lab/lims/test_data.db" # Your local test
 production:
   app_prod: yes
+  db_path: "/Users/cychang/Dropbox/lab/lims/data/lims.db" # The real one
 dev:
   golem_wd: !expr golem::pkg_path()

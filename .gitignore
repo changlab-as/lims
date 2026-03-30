@@ -58,3 +58,6 @@ data/*.db
 inst/doc
 /doc/
 /Meta/
+
+# Purge the .DS_Store
+.DS_Store
