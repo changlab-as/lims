@@ -1,31 +1,28 @@
-#' Run the LIMS Application
+#' Run the Shiny Application
 #'
-#' Launches the Shiny application with database pool
+#' @param ... arguments to pass to golem_opts.
+#' See `?golem::get_golem_options` for more details.
+#' @inheritParams shiny::shinyApp
 #'
 #' @export
-run_app <- function() {
-  
-  # Initialize database
-  db_path <- initialize_database()
-  
-  # Create connection pool
-  pool <- pool::dbPool(
-    drv     = RSQLite::SQLite(),
-    dbname  = db_path,
-    minSize = 1,
-    maxSize = 5
-  )
-  
-  # Cleanup on app stop
-  shiny::onStop(function() {
-    pool::poolClose(pool)
-  })
-  
-  # Run the application
-  shiny::shinyApp(
-    ui = app_ui,
-    server = function(input, output, session) {
-      app_server(input, output, session, pool)
-    }
+#' @importFrom shiny shinyApp
+#' @importFrom golem with_golem_options
+run_app <- function(
+  onStart = NULL,
+  options = list(),
+  enableBookmarking = NULL,
+  uiPattern = "/",
+  ...
+) {
+  with_golem_options(
+    app = shinyApp(
+      ui = app_ui,
+      server = app_server,
+      onStart = onStart,
+      options = options,
+      enableBookmarking = enableBookmarking,
+      uiPattern = uiPattern
+    ),
+    golem_opts = list(...)
   )
 }

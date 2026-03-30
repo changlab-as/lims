@@ -1,22 +1,74 @@
-# Golem Development Configuration
-# This file guides the development workflow for the LIMS package
+# Building a Prod-Ready, Robust Shiny Application.
+#
+# README: each step of the dev files is optional, and you don't have to
+# fill every dev scripts before getting started.
+# 01_start.R should be filled at start.
+# 02_dev.R should be used to keep track of your development during the project.
+# 03_deploy.R should be used once you need to deploy your app.
+#
+#
+########################################
+#### CURRENT FILE: ON START SCRIPT #####
+########################################
 
-# 1. Run this script first (once per session):
-# setwd("~/Desktop/lab/lims")
-# devtools::load_all()
+## Fill the DESCRIPTION ----
+## Add meta data about your application and set some default {golem} options
+##
+## /!\ Note: if you want to change the name of your app during development,
+## either re-run this function, call golem::set_golem_name(), or don't forget
+## to change the name in the app_sys() function in app_config.R /!\
+##
+golem::fill_desc(
+  pkg_name = "lims", # The name of the golem package containing the app (typically lowercase, no underscore or periods)
+  pkg_title = "Chang lab LIMS", # What the Package Does (One Line, Title Case, No Period)
+  pkg_description = "PKG_DESC.", # What the package does (one paragraph).
+  authors = person(
+    given = "Chang-Yu", # Your First Name
+    family = "Chang", # Your Last Name
+    email = "changyuchang@as.edu.tw", # Your email
+    role = c("aut", "cre") # Your role (here author/creator)
+  ),
+  repo_url = NULL, # The URL of the GitHub repo (optional),
+  pkg_version = "0.0.0.9000", # The version of the package containing the app
+  set_options = TRUE # Set the global golem options
+)
 
-# 2. During development, use:
-devtools::load_all()
+## Install the required dev dependencies ----
+golem::install_dev_deps()
 
-# 3. Test interactively:
-lims::run_app()
+## Create Common Files ----
+## See ?usethis for more information
+usethis::use_mit_license("Golem User") # You can set another license here
+golem::use_readme_rmd(open = FALSE)
+devtools::build_readme()
+# Note that `contact` is required since usethis version 2.1.5
+# If your {usethis} version is older, you can remove that param
+usethis::use_code_of_conduct(contact = "Golem User")
+usethis::use_lifecycle_badge("Experimental")
+usethis::use_news_md(open = FALSE)
 
-# 4. Run unit tests:
-devtools::test()
+## Init Testing Infrastructure ----
+## Create a template for tests
+golem::use_recommended_tests()
 
-# 5. Check the package:
-devtools::check()
+## Favicon ----
+# If you want to change the favicon (default is golem's one)
+golem::use_favicon(path = "inst/app/www/logo.png")
+# golem::remove_favicon() # Uncomment to remove the default favicon
 
-# 6. Load app with golem features:
-library(shiny)
-library(lims)
+## Add helper functions ----
+golem::use_utils_ui(with_test = TRUE)
+golem::use_utils_server(with_test = TRUE)
+
+## Use git ----
+usethis::use_git()
+## Sets the remote associated with 'name' to 'url'
+usethis::use_git_remote(
+  name = "origin",
+  url = "https://github.com/Chang-Yu-Chang/lims.git"
+)
+
+# You're now set! ----
+
+# go to dev/02_dev.R
+rstudioapi::navigateToFile("dev/02_dev.R")

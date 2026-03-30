@@ -1,37 +1,54 @@
-#' App UI
+#' The application User-Interface
 #'
-#' Main application UI combining all modules
-#'
-#' @export
-app_ui <- function() {
-  shiny::page_navbar(
-    title = "🧪 Chang Lab LIMS",
-    theme = bslib::bs_theme(bootswatch = "flatly"),
+#' @param request Internal parameter for `{shiny}`.
+#'     DO NOT REMOVE.
+#' @import shiny
+#' @noRd
+app_ui <- function(request) {
+  tagList(
+    # External resources
+    golem_add_external_resources(),
     
-    # Navigation panels
-    shiny::nav_panel("Create Sites", mod_inventory_ui("inventory")),
-    shiny::nav_panel("Generate Labels", mod_labels_ui("labels")),
-    shiny::nav_panel("Batch Scan", mod_batch_scan_ui("batch_scan")),
-    
-    # Header with CSS and JavaScript initialization
-    header = shiny::tagList(
-      shinyjs::useShinyjs(),
-      shiny::tags$head(
-        shiny::tags$link(
-          rel = "stylesheet", 
-          type = "text/css", 
-          href = "styles.css"
-        )
+    # Main app with navbar
+    shiny::navbarPage(
+      title = "Chang Lab LIMS",
+      
+      # HOME TAB
+      shiny::tabPanel(
+        "Home",
+        mod_home_ui("home")
+      ),
+      
+      # SITES TAB (placeholder)
+      shiny::tabPanel(
+        "Sites",
+        mod_sites_ui("sites")
       )
-    ),
-    
-    # Footer
-    footer = shiny::tags$footer(
-      style = "margin-top: 40px; padding: 20px; border-top: 1px solid #ddd; 
-               text-align: center; color: #999;",
-      "Chang Lab LIMS v0.1.0 | Built with Shiny + Golem"
-    ),
-    
-    id = "main_navbar"
+    )
+  )
+}
+
+#' Add external Resources to the Application
+#'
+#' This function is internally used to add external
+#' resources inside the Shiny application.
+#'
+#' @import shiny
+#' @importFrom golem add_resource_path activate_js favicon bundle_resources
+#' @noRd
+golem_add_external_resources <- function() {
+  add_resource_path(
+    "www",
+    app_sys("app/www")
+  )
+
+  tags$head(
+    favicon(ext = 'png'),
+    bundle_resources(
+      path = app_sys("app/www"),
+      app_title = "lims"
+    )
+    # Add here other external resources
+    # for example, you can add shinyalert::useShinyalert()
   )
 }

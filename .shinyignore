@@ -1,0 +1,6 @@
+R/
+data/
+tests/
+dev/
+.git/
+.Rproj.user/

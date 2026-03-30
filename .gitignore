@@ -55,3 +55,6 @@ data/barcodes/
 data/*.sqlite
 data/*.db
 *.zip
+inst/doc
+/doc/
+/Meta/

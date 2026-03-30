@@ -1,25 +1,26 @@
 Package: lims
-Title: Laboratory Information Management System
-Version: 0.1.0
-Description: A Shiny-based LIMS for sample tracking and label generation
-Authors@R: person("Chang Lab", role = c("aut", "cre"))
+Title: Chang lab LIMS
+Version: 0.0.0.9000
+Authors@R: 
+    person("Chang-Yu", "Chang", , "changyuchang@as.edu.tw", role = c("aut", "cre"))
+Description: PKG_DESC.
 License: MIT + file LICENSE
-Encoding: UTF-8
-LazyData: TRUE
-Imports:
-    shiny,
-    bslib,
-    shinyjs,
-    DT,
-    RSQLite,
-    qrcode,
-    pool,
-    dplyr,
+Imports: 
+    config,
     DBI,
-    gridExtra,
-    grid,
-    base64enc
-Suggests:
-    testthat,
-    mockery
-RoxygenNote: 7.1.2
+    DT,
+    golem,
+    pool,
+    qrcode,
+    RSQLite,
+    shiny,
+    shinyjs,
+    stats
+Suggests: 
+    knitr,
+    rmarkdown,
+    testthat
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.3.3
+VignetteBuilder: knitr

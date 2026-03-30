@@ -1,63 +1,78 @@
-#' Database Utility Functions
-#' 
-#' All database operations for LIMS, no Shiny dependencies
-#' These functions work with explicit database connections
-#'
-#' @import DBI
-#' @import RSQLite
-
 #' Initialize Database
 #'
-#' @return Path to database file
+#' Creates SQLite database with required schema for LIMS
+#'
+#' @return Path to the database file
 #' @export
 initialize_database <- function() {
-  db_path <- "data/lims_db.sqlite"
+  db_path <- "lims_data.db"
   
-  if (!dir.exists("data")) dir.create("data")
+  if (!file.exists(db_path)) {
+    con <- DBI::dbConnect(RSQLite::SQLite(), db_path)
+    
+    # Sites table
+    DBI::dbExecute(con, "
+      CREATE TABLE sites (
+        site_id TEXT PRIMARY KEY,
+        site_name TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    ")
+    
+    # Labels table
+    DBI::dbExecute(con, "
+      CREATE TABLE labels (
+        label_id TEXT PRIMARY KEY,
+        site_id TEXT NOT NULL,
+        sample_id TEXT NOT NULL,
+        qr_code_path TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(site_id) REFERENCES sites(site_id)
+      )
+    ")
+    
+    # Batch scans table
+    DBI::dbExecute(con, "
+      CREATE TABLE batch_scans (
+        scan_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        site_id TEXT NOT NULL,
+        scanner_input TEXT,
+        scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(site_id) REFERENCES sites(site_id)
+      )
+    ")
+    
+    DBI::dbDisconnect(con)
+  }
   
-  con <- DBI::dbConnect(RSQLite::SQLite(), db_path)
-  
-  # Create Sites table
-  DBI::dbExecute(con, "DROP TABLE IF EXISTS Sites")
-  DBI::dbExecute(con, "
-    CREATE TABLE Sites (
-      site_id   TEXT PRIMARY KEY,
-      site_name TEXT NOT NULL,
-      site_lat  TEXT,
-      site_long TEXT
-    )
-  ")
-  
-  # Create Labels table
-  DBI::dbExecute(con, "DROP TABLE IF EXISTS Labels")
-  DBI::dbExecute(con, "
-    CREATE TABLE Labels (
-      label_id      TEXT PRIMARY KEY,
-      stage         INTEGER,
-      site_id       TEXT,
-      sample_type   TEXT,
-      sample_id     TEXT,
-      sample_status TEXT DEFAULT 'label_created',
-      created_date  DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY(site_id) REFERENCES Sites(site_id)
-    )
-  ")
-  
-  # Create Batch Scans table
-  DBI::dbExecute(con, "DROP TABLE IF EXISTS BatchScans")
-  DBI::dbExecute(con, "
-    CREATE TABLE BatchScans (
-      scan_id       TEXT PRIMARY KEY,
-      site_id       TEXT,
-      sample_id     TEXT,
-      scan_time     DATETIME DEFAULT CURRENT_TIMESTAMP,
-      scanner_id    TEXT,
-      FOREIGN KEY(site_id) REFERENCES Sites(site_id)
-    )
-  ")
-  
-  DBI::dbDisconnect(con)
-  return(db_path)
+  db_path
+}
+
+#' Insert Site
+#'
+#' @param con Database connection
+#' @param site_id Site ID
+#' @param site_name Site name
+#' @export
+insert_site <- function(con, site_id, site_name) {
+  DBI::dbExecute(con, 
+    "INSERT INTO sites (site_id, site_name) VALUES (?, ?)",
+    list(site_id, site_name)
+  )
+}
+
+#' Check if Site Exists
+#'
+#' @param con Database connection
+#' @param site_id Site ID to check
+#' @return Logical TRUE if exists
+#' @export
+check_site_exists <- function(con, site_id) {
+  result <- DBI::dbGetQuery(con, 
+    "SELECT COUNT(*) as n FROM sites WHERE site_id = ?",
+    list(site_id)
+  )
+  result$n > 0
 }
 
 #' Fetch All Sites
@@ -66,47 +81,35 @@ initialize_database <- function() {
 #' @return Data frame of all sites
 #' @export
 fetch_all_sites <- function(con) {
-  DBI::dbGetQuery(con, "SELECT * FROM Sites")
+  DBI::dbGetQuery(con, "SELECT * FROM sites ORDER BY created_at DESC")
 }
 
 #' Fetch Site by ID
 #'
-#' @param site_id Site identifier
 #' @param con Database connection
-#' @return Data frame with single site or empty if not found
+#' @param site_id Site ID to fetch
+#' @return Data frame of matching site
 #' @export
-fetch_site_by_id <- function(site_id, con) {
+fetch_site_by_id <- function(con, site_id) {
   DBI::dbGetQuery(con, 
-    "SELECT * FROM Sites WHERE site_id = ?",
-    params = list(site_id)
+    "SELECT * FROM sites WHERE site_id = ?",
+    list(site_id)
   )
 }
 
-#' Insert Site
+#' Insert Label
 #'
-#' @param site_id Site identifier
-#' @param site_name Site name/description
 #' @param con Database connection
+#' @param label_id Label ID
+#' @param site_id Site ID
+#' @param sample_id Sample ID
+#' @param qr_code_path Path to QR code image
 #' @export
-insert_site <- function(site_id, site_name, con) {
+insert_label <- function(con, label_id, site_id, sample_id, qr_code_path) {
   DBI::dbExecute(con,
-    "INSERT INTO Sites (site_id, site_name) VALUES (?, ?)",
-    params = list(site_id, site_name)
+    "INSERT INTO labels (label_id, site_id, sample_id, qr_code_path) VALUES (?, ?, ?, ?)",
+    list(label_id, site_id, sample_id, qr_code_path)
   )
-}
-
-#' Check if Site Exists
-#'
-#' @param site_id Site identifier
-#' @param con Database connection
-#' @return Logical TRUE if exists
-#' @export
-check_site_exists <- function(site_id, con) {
-  result <- DBI::dbGetQuery(con,
-    "SELECT COUNT(*) as count FROM Sites WHERE site_id = ?",
-    params = list(site_id)
-  )
-  result$count[1] > 0
 }
 
 #' Fetch All Labels
@@ -115,115 +118,86 @@ check_site_exists <- function(site_id, con) {
 #' @return Data frame of all labels
 #' @export
 fetch_all_labels <- function(con) {
-  DBI::dbGetQuery(con, "SELECT * FROM Labels")
+  DBI::dbGetQuery(con, "SELECT * FROM labels ORDER BY created_at DESC")
 }
 
-#' Insert Label
+#' Insert Batch Scan
 #'
-#' @param label_id Label identifier
-#' @param stage Processing stage
-#' @param site_id Site identifier
-#' @param sample_type Type of sample
-#' @param sample_id Sample identifier
 #' @param con Database connection
+#' @param site_id Site ID
+#' @param scanner_input Scanned data
 #' @export
-insert_label <- function(label_id, stage, site_id, sample_type, sample_id, con) {
+insert_batch_scan <- function(con, site_id, scanner_input) {
   DBI::dbExecute(con,
-    "INSERT INTO Labels (label_id, stage, site_id, sample_type, sample_id) 
-     VALUES (?, ?, ?, ?, ?)",
-    params = list(label_id, stage, site_id, sample_type, sample_id)
+    "INSERT INTO batch_scans (site_id, scanner_input) VALUES (?, ?)",
+    list(site_id, scanner_input)
   )
 }
 
 #' Fetch All Batch Scans
 #'
 #' @param con Database connection
-#' @return Data frame of all batch scans
+#' @return Data frame of all batch scans with site names
 #' @export
 fetch_all_batch_scans <- function(con) {
   DBI::dbGetQuery(con, "
     SELECT bs.*, s.site_name 
-    FROM BatchScans bs
-    LEFT JOIN Sites s ON bs.site_id = s.site_id
-    ORDER BY bs.scan_time DESC
+    FROM batch_scans bs
+    LEFT JOIN sites s ON bs.site_id = s.site_id
+    ORDER BY bs.scanned_at DESC
   ")
-}
-
-#' Insert Batch Scan
-#'
-#' @param scan_id Scan identifier
-#' @param site_id Site identifier
-#' @param sample_id Sample identifier
-#' @param scanner_id Scanner device ID
-#' @param con Database connection
-#' @export
-insert_batch_scan <- function(scan_id, site_id, sample_id, scanner_id, con) {
-  DBI::dbExecute(con,
-    "INSERT INTO BatchScans (scan_id, site_id, sample_id, scanner_id) 
-     VALUES (?, ?, ?, ?)",
-    params = list(scan_id, site_id, sample_id, scanner_id)
-  )
 }
 
 #' Generate Site ID
 #'
-#' @return Character string in format ST####
+#' @return Generated site ID (ST####)
 #' @export
 generate_site_id <- function() {
-  sprintf("ST%04d", sample(0:9999, 1))
+  paste0("ST", sprintf("%04d", sample(1:9999, 1)))
 }
 
 #' Generate Plant ID
 #'
-#' @param site_id Site identifier
-#' @return Character string in format P####
+#' @return Generated plant ID (P####)
 #' @export
-generate_plant_id <- function(site_id) {
-  sprintf("P%04d", sample(0:9999, 1))
+generate_plant_id <- function() {
+  paste0("P", sprintf("%04d", sample(1:9999, 1)))
 }
 
 #' Generate Processing ID
 #'
-#' @return Character string in format PR####
+#' @return Generated processing ID (PR####)
 #' @export
 generate_proc_id <- function() {
-  sprintf("PR%04d", sample(0:9999, 1))
+  paste0("PR", sprintf("%04d", sample(1:9999, 1)))
 }
 
-#' Generate Label PNG with QR Code
+#' Validate Site ID
 #'
-#' @param label_id Label identifier
-#' @param site_id Site identifier
-#' @param sample_id Sample identifier
-#' @param output_path Path to save PNG
-#' @export
-generate_label_png <- function(label_id, site_id, sample_id, output_path = "www/labels") {
-  if (!dir.exists(output_path)) dir.create(output_path, recursive = TRUE)
-  
-  qr_data <- paste(label_id, site_id, sample_id, sep = "|")
-  qr_code <- qrcode::qr_code(qr_data)
-  
-  png_path <- file.path(output_path, paste0(label_id, ".png"))
-  
-  png::writePNG(grid::rasterGrob(qr_code)$raster, png_path)
-  
-  return(png_path)
-}
-
-#' Validate Site ID Format
-#'
-#' @param site_id Site identifier to validate
-#' @return Logical TRUE if valid
+#' @param site_id Site ID to validate
+#' @return Logical TRUE if valid format
 #' @export
 validate_site_id <- function(site_id) {
   grepl("^ST\\d{4}$", site_id)
 }
 
-#' Validate Sample ID Format
+#' Validate Sample ID
 #'
-#' @param sample_id Sample identifier to validate
-#' @return Logical TRUE if valid
+#' @param sample_id Sample ID to validate
+#' @return Logical TRUE if not empty
 #' @export
 validate_sample_id <- function(sample_id) {
-  !is.na(sample_id) && nzchar(trimws(sample_id))
+  !is.null(sample_id) && nzchar(trimws(sample_id))
+}
+
+#' Generate Label PNG
+#'
+#' @param qr_text Text for QR code
+#' @param filename Output filename
+#' @return Path to generated image
+#' @export
+generate_label_png <- function(qr_text, filename) {
+  qr <- qrcode::qr_code(qr_text)
+  qrcode::plot(qr, type = "html")
+  filename
 }
