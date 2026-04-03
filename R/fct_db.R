@@ -14,6 +14,15 @@ initialize_database <- function() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     ")
+
+    # Create the 'samples' table with site_id as the primary handle
+    DBI::dbExecute(con, "
+      CREATE TABLE samples (
+        site_id TEXT PRIMARY KEY,
+        plant_id TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    ")
     
     DBI::dbDisconnect(con)
   }

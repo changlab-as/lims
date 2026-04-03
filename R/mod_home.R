@@ -70,11 +70,34 @@ mod_home_ui <- function(id) {
         theme = NULL,
         fill = FALSE,
         class = "border-0 shadow-sm"
+      )
+    ),
+
+    bslib::layout_column_wrap(
+      width = 1/3,
+      gap = "1rem",
+      style = "min-height: 250px; min-width: 300px;",
+      
+      bslib::value_box(
+        title = "HAHA",
+        value = "1", # Pure hardcoded string for testing
+        showcase = bsicons::bs_icon("geo-alt-fill", class = "text-primary"),
+        theme = NULL,
+        fill = FALSE,
+        class = "border-0 shadow-sm"
       ),
       bslib::value_box(
-        title = "Total Scans",
-        value = "12",
-        showcase = bsicons::bs_icon("qr-code-scan", class = "text-primary"),
+        title = "OK",
+        value = "42", 
+        showcase = bsicons::bs_icon("basket2-fill", class = "text-primary"),
+        theme = NULL,
+        fill = FALSE,
+        class = "border-0 shadow-sm"
+      ),
+      bslib::value_box(
+        title = "GREAT",
+        value = "2", 
+        showcase = bsicons::bs_icon("house-door-fill", class = "text-primary"),
         theme = NULL,
         fill = FALSE,
         class = "border-0 shadow-sm"

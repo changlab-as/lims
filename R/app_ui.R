@@ -27,8 +27,13 @@ app_ui <- function(request) {
     # Main app with navbar
     bslib::page_navbar(
       id = "main_nav",
-      title = "Chang Lab LIMS",
+      title = shiny::actionLink(
+        inputId = "go_home", 
+        label = "Chang Lab LIMS", 
+        style = "color: inherit; text-decoration: none; font-weight: bold;"
+      ),
       theme = my_theme,
+      fillable = FALSE,
 
       # HOME TAB
       bslib::nav_panel(
@@ -37,11 +42,18 @@ app_ui <- function(request) {
         mod_home_ui("home")
       ),
       
-      # SITES TAB (placeholder)
+      # SITES TAB
       bslib::nav_panel(
         title = "Sites",
         value = "sites",
         mod_sites_ui("sites")
+      ),
+
+      # LABELS TAB
+      bslib::nav_panel(
+        title = "Labels",
+        value = "label",
+        mod_labels_ui("labels")
       )
     )
   )
@@ -65,7 +77,7 @@ golem_add_external_resources <- function() {
     favicon(ext = 'png'),
     bundle_resources(
       path = app_sys("app/www"),
-      app_title = "lims"
+      app_title = "Chang Lab LIMS"
     )
     # Add here other external resources
     # for example, you can add shinyalert::useShinyalert()

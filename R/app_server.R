@@ -5,6 +5,12 @@
 #' @import shiny
 #' @noRd
 app_server <- function(input, output, session) {
+  
+  # When the title is clicked, navigate to the home page
+  observeEvent(input$go_home, {
+    bslib::nav_select(id = "main_nav", selected = "home")
+  })
+  
   # 1. Run the core database initialization first
   initialize_database()
   
@@ -40,4 +46,5 @@ app_server <- function(input, output, session) {
   # Initialize modules
   mod_home_server("home", pool)
   mod_sites_server("sites", pool)
+  mod_labels_server("labels", pool)
 }

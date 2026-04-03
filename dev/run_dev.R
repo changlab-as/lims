@@ -3,6 +3,7 @@
 options(golem.app.prod = FALSE) 
 options(shiny.autoreload = TRUE)
 # This pattern tells Shiny to watch your Module and Function files specifically
+options(shiny.autoreload.r = TRUE) 
 options(shiny.autoreload.pattern = glob2rx("R/*.R"))
 options(shiny.autoreload.legacy_warning = FALSE)
 
@@ -18,6 +19,7 @@ golem::detach_all_attached()
 # Document and load the package into memory
 # This makes functions like db_site_add() available
 golem::document_and_reload()
+pkgload::load_all()   # Load the package into memory
 
 # 4. PRINT STATUS
 # ---------------------------------------------------------
@@ -32,3 +34,4 @@ cat("============================================\n\n")
 # 5. START APP
 # ---------------------------------------------------------
 run_app()
+
